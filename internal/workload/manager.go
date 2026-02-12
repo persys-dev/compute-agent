@@ -2,12 +2,15 @@ package workload
 
 import (
 	"context"
+	stdErrors "errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/persys/compute-agent/internal/errors"
 	"github.com/persys/compute-agent/internal/metrics"
 	"github.com/persys/compute-agent/internal/resources"
+	"github.com/persys/compute-agent/internal/retry"
 	"github.com/persys/compute-agent/internal/runtime"
 	"github.com/persys/compute-agent/internal/state"
 	"github.com/persys/compute-agent/pkg/models"
@@ -21,14 +24,20 @@ type Manager struct {
 	logger          *logrus.Entry
 	metrics         *metrics.Metrics
 	resourceMonitor *resources.Monitor
+
+	retryPolicy   *retry.RetryPolicy
+	retryTrackers map[string]*retry.RetryTracker
+	retryMu       sync.Mutex
 }
 
 // NewManager creates a new workload manager
 func NewManager(store state.Store, runtimeMgr *runtime.Manager, logger *logrus.Logger) *Manager {
 	return &Manager{
-		store:      store,
-		runtimeMgr: runtimeMgr,
-		logger:     logger.WithField("component", "workload-manager"),
+		store:         store,
+		runtimeMgr:    runtimeMgr,
+		logger:        logger.WithField("component", "workload-manager"),
+		retryPolicy:   retry.DefaultRetryPolicy(),
+		retryTrackers: make(map[string]*retry.RetryTracker),
 	}
 }
 
@@ -40,6 +49,61 @@ func (m *Manager) SetMetrics(metricsInst *metrics.Metrics) {
 // SetResourceMonitor sets the resource monitor for availability checks
 func (m *Manager) SetResourceMonitor(monitor *resources.Monitor) {
 	m.resourceMonitor = monitor
+}
+
+// SetRetryPolicy sets retry policy used by reconciliation when handling failed workloads
+func (m *Manager) SetRetryPolicy(policy *retry.RetryPolicy) {
+	if policy == nil {
+		policy = retry.DefaultRetryPolicy()
+	}
+	m.retryMu.Lock()
+	m.retryPolicy = policy
+	m.retryMu.Unlock()
+}
+
+func (m *Manager) getRetryTracker(workloadID string) *retry.RetryTracker {
+	m.retryMu.Lock()
+	defer m.retryMu.Unlock()
+	tracker, ok := m.retryTrackers[workloadID]
+	if !ok {
+		tracker = retry.NewRetryTracker(m.retryPolicy)
+		m.retryTrackers[workloadID] = tracker
+	}
+	return tracker
+}
+
+func (m *Manager) resetRetryTracker(workloadID string) {
+	m.retryMu.Lock()
+	delete(m.retryTrackers, workloadID)
+	m.retryMu.Unlock()
+}
+
+func ensureMetadata(status *models.WorkloadStatus) {
+	if status.Metadata == nil {
+		status.Metadata = make(map[string]string)
+	}
+}
+
+func (m *Manager) enrichStatusWithRuntimeMetadata(ctx context.Context, rt runtime.Runtime, workloadID string, status *models.WorkloadStatus) {
+	provider, ok := rt.(runtime.StatusMetadataProvider)
+	if !ok || status == nil {
+		return
+	}
+
+	metadata, err := provider.StatusMetadata(ctx, workloadID)
+	if err != nil {
+		m.logger.Debugf("No runtime metadata available for %s: %v", workloadID, err)
+		return
+	}
+
+	if len(metadata) == 0 {
+		return
+	}
+
+	ensureMetadata(status)
+	for k, v := range metadata {
+		status.Metadata[k] = v
+	}
 }
 
 // ApplyWorkload applies a workload with revision-based idempotency
@@ -70,6 +134,33 @@ func (m *Manager) ApplyWorkload(ctx context.Context, workload *models.Workload) 
 	rt, err := m.runtimeMgr.GetRuntime(workload.Type)
 	if err != nil {
 		return nil, false, fmt.Errorf("runtime not available: %w", err)
+	}
+
+	// Check resource availability before persisting workload state or creating runtime resources
+	if m.resourceMonitor != nil {
+		available, issues, err := m.resourceMonitor.IsResourceAvailable()
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to validate resource availability: %w", err)
+		}
+
+		if !available {
+			if m.metrics != nil {
+				m.metrics.RecordWorkloadFailed()
+				m.metrics.RecordError(string(errors.ErrCodeResourceQuotaExceeded))
+			}
+
+			workloadErr := errors.NewWorkloadError(
+				errors.ErrCodeResourceQuotaExceeded,
+				"Insufficient system resources to admit workload",
+				workload.ID,
+				string(workload.Type),
+				nil,
+			)
+			workloadErr.WithDetail("issues", issues)
+			workloadErr.WithDetail("revision", workload.RevisionID)
+
+			return nil, false, workloadErr
+		}
 	}
 
 	// If revision changed, we need to recreate
@@ -185,6 +276,8 @@ func (m *Manager) ApplyWorkload(ctx context.Context, workload *models.Workload) 
 		UpdatedAt:    time.Now(),
 	}
 
+	m.enrichStatusWithRuntimeMetadata(ctx, rt, workload.ID, status)
+
 	if err := m.store.SaveStatus(status); err != nil {
 		return status, false, fmt.Errorf("failed to save status: %w", err)
 	}
@@ -254,6 +347,7 @@ func (m *Manager) GetStatus(ctx context.Context, id string) (*models.WorkloadSta
 				status.ActualState = actualState
 				status.Message = message
 				status.UpdatedAt = time.Now()
+				m.enrichStatusWithRuntimeMetadata(ctx, rt, id, status)
 				m.store.SaveStatus(status)
 			}
 		}
@@ -320,8 +414,31 @@ func (m *Manager) ReconcileWorkload(ctx context.Context, id string) error {
 		m.logger.Debugf("Skipping reconciliation for %s: workload is in transient state (%s)", id, actualState)
 		needsAction = false
 	} else if actualState == models.ActualStateFailed {
-		// Retry failed workloads - they may have failed due to transient issues like network timeouts
-		m.logger.Infof("Reconciling %s: status=failed, attempting to recreate...", id)
+		tracker := m.getRetryTracker(id)
+		reason := retry.ClassifyError(stdErrors.New(status.Message))
+		retryResult, recordErr := tracker.RecordFailure(reason, status.Message)
+		if recordErr != nil {
+			m.logger.Warnf("Failed to record retry metadata for %s: %v", id, recordErr)
+		}
+
+		ensureMetadata(status)
+		status.Metadata["retry_attempts"] = fmt.Sprintf("%d", tracker.GetAttemptCount())
+		status.Metadata["failure_reason"] = string(reason)
+		status.Metadata["last_error"] = status.Message
+
+		if retryResult != nil && retryResult.Retryable {
+			status.Metadata["next_retry_time"] = retryResult.NextRetryTime.Format(time.RFC3339)
+			if !tracker.CanRetryNow() {
+				m.logger.Debugf("Skipping retry for %s until %s", id, retryResult.NextRetryTime.Format(time.RFC3339))
+				return m.store.SaveStatus(status)
+			}
+		} else {
+			m.logger.Infof("Not retrying failed workload %s (reason: %s)", id, reason)
+			return m.store.SaveStatus(status)
+		}
+
+		// Retry failed workloads when policy allows
+		m.logger.Infof("Reconciling %s: status=failed, attempting retry recreate...", id)
 
 		// Delete the failed workload first
 		if err := rt.Delete(ctx, id); err != nil {
@@ -344,6 +461,11 @@ func (m *Manager) ReconcileWorkload(ctx context.Context, id string) error {
 				} else {
 					status.ActualState = models.ActualStateRunning
 					status.Message = "running"
+					m.resetRetryTracker(id)
+					delete(status.Metadata, "retry_attempts")
+					delete(status.Metadata, "next_retry_time")
+					delete(status.Metadata, "failure_reason")
+					delete(status.Metadata, "last_error")
 				}
 			}
 		}
@@ -374,6 +496,9 @@ func (m *Manager) ReconcileWorkload(ctx context.Context, id string) error {
 			status.Message = message
 		}
 	}
+
+	// Enrich with runtime metadata when available
+	m.enrichStatusWithRuntimeMetadata(ctx, rt, id, status)
 
 	// Save updated status
 	return m.store.SaveStatus(status)

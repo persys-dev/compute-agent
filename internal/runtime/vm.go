@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/digitalocean/go-libvirt"
 	"github.com/persys/compute-agent/pkg/models"
@@ -199,6 +200,64 @@ func (v *VMRuntime) Status(ctx context.Context, id string) (models.ActualState, 
 	}
 
 	return actualState, message, nil
+}
+
+// StatusMetadata returns additional VM status context including IPs and interfaces.
+func (v *VMRuntime) StatusMetadata(ctx context.Context, id string) (map[string]string, error) {
+	domain, err := v.conn.DomainLookupByName(id)
+	if err != nil {
+		return nil, fmt.Errorf("failed to lookup domain: %w", err)
+	}
+
+	// Prefer DHCP lease source first, then guest agent fallback.
+	ifaces, err := v.conn.DomainInterfaceAddresses(domain, uint32(libvirt.DomainInterfaceAddressesSrcLease), 0)
+	if err != nil || len(ifaces) == 0 {
+		ifaces, err = v.conn.DomainInterfaceAddresses(domain, uint32(libvirt.DomainInterfaceAddressesSrcAgent), 0)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get domain interface addresses: %w", err)
+		}
+	}
+
+	metadata := make(map[string]string)
+	var ips []string
+	var macs []string
+	var ifaceParts []string
+
+	for _, iface := range ifaces {
+		mac := ""
+		if len(iface.Hwaddr) > 0 {
+			mac = iface.Hwaddr[0]
+		}
+		if mac != "" {
+			macs = append(macs, mac)
+		}
+
+		var ifaceIPs []string
+		for _, addr := range iface.Addrs {
+			if addr.Addr == "" {
+				continue
+			}
+			ips = append(ips, addr.Addr)
+			ifaceIPs = append(ifaceIPs, addr.Addr)
+		}
+
+		if iface.Name != "" {
+			ifaceParts = append(ifaceParts, fmt.Sprintf("%s:%s", iface.Name, strings.Join(ifaceIPs, "|")))
+		}
+	}
+
+	if len(ips) > 0 {
+		metadata["vm.ip_addresses"] = strings.Join(ips, ",")
+		metadata["vm.primary_ip"] = ips[0]
+	}
+	if len(macs) > 0 {
+		metadata["vm.mac_addresses"] = strings.Join(macs, ",")
+	}
+	if len(ifaceParts) > 0 {
+		metadata["vm.interfaces"] = strings.Join(ifaceParts, ",")
+	}
+
+	return metadata, nil
 }
 
 func (v *VMRuntime) List(ctx context.Context) ([]string, error) {
