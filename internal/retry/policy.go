@@ -3,6 +3,7 @@ package retry
 import (
 	"fmt"
 	"math"
+	"strings"
 	"time"
 )
 
@@ -316,15 +317,15 @@ func isSpecError(msg string) bool {
 }
 
 func contains(str string, keywords ...string) bool {
-	str = fmt.Sprintf(" %s ", str) // Add padding for word boundaries
+	str = strings.ToLower(fmt.Sprintf(" %s ", str)) // Add padding for word boundaries
 	for _, keyword := range keywords {
-		if contains_helper(str, keyword) {
+		if containsHelper(str, strings.ToLower(keyword)) {
 			return true
 		}
 	}
 	return false
 }
 
-func contains_helper(haystack, needle string) bool {
-	return len(haystack) > 0 && len(needle) > 0 // Placeholder
+func containsHelper(haystack, needle string) bool {
+	return strings.Contains(haystack, needle)
 }
