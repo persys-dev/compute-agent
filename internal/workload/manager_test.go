@@ -495,6 +495,65 @@ func TestReconcileWorkload_FailedWorkload_RespectsRetryBackoff(t *testing.T) {
 	mockStore.AssertExpectations(t)
 }
 
+func TestReconcileWorkload_FailedWorkload_DoesNotConsumeAttemptsBeforeBackoffWindow(t *testing.T) {
+	mockStore := new(MockStore)
+	mockRuntime := new(MockRuntime)
+
+	runtimeMgr := runtime.NewManager()
+	mockRuntime.On("Type").Return(models.WorkloadTypeContainer)
+	runtimeMgr.Register(mockRuntime)
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.FatalLevel)
+
+	manager := NewManager(mockStore, runtimeMgr, logger)
+	manager.SetRetryPolicy(&retry.RetryPolicy{
+		MaxAttempts:        3,
+		InitialDelay:       1 * time.Hour,
+		MaxDelay:           1 * time.Hour,
+		BackoffMultiplier:  2,
+		OnlyRetryTransient: true,
+	})
+
+	workload := &models.Workload{
+		ID:           "failed-workload",
+		Type:         models.WorkloadTypeContainer,
+		DesiredState: models.DesiredStateRunning,
+	}
+
+	status := &models.WorkloadStatus{
+		ID:           "failed-workload",
+		Type:         models.WorkloadTypeContainer,
+		DesiredState: models.DesiredStateRunning,
+		ActualState:  models.ActualStateFailed,
+		Message:      "network timeout while pulling image",
+	}
+
+	mockStore.On("GetWorkload", "failed-workload").Return(workload, nil).Twice()
+	mockStore.On("GetStatus", "failed-workload").Return(status, nil).Twice()
+	mockRuntime.On("Status", mock.Anything, "failed-workload").Return(
+		models.ActualStateFailed, "network timeout while pulling image", nil,
+	).Twice()
+
+	mockStore.On("SaveStatus", mock.MatchedBy(func(s *models.WorkloadStatus) bool {
+		if s.Metadata == nil {
+			return false
+		}
+		return s.Metadata["retry_attempts"] == "1"
+	})).Return(nil).Twice()
+
+	err := manager.ReconcileWorkload(context.Background(), "failed-workload")
+	assert.NoError(t, err)
+
+	err = manager.ReconcileWorkload(context.Background(), "failed-workload")
+	assert.NoError(t, err)
+
+	mockRuntime.AssertNotCalled(t, "Delete", mock.Anything, "failed-workload")
+	mockRuntime.AssertNotCalled(t, "Create", mock.Anything, mock.Anything)
+	mockRuntime.AssertNotCalled(t, "Start", mock.Anything, "failed-workload")
+	mockStore.AssertExpectations(t)
+}
+
 func TestGetStatus_SurfacesRuntimeMetadata(t *testing.T) {
 	mockStore := new(MockStore)
 	baseRuntime := new(MockRuntime)

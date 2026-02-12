@@ -415,6 +415,14 @@ func (m *Manager) ReconcileWorkload(ctx context.Context, id string) error {
 		needsAction = false
 	} else if actualState == models.ActualStateFailed {
 		tracker := m.getRetryTracker(id)
+		if tracker.GetAttemptCount() > 0 && !tracker.CanRetryNow() {
+			ensureMetadata(status)
+			status.Metadata["retry_attempts"] = fmt.Sprintf("%d", tracker.GetAttemptCount())
+			status.Metadata["next_retry_time"] = tracker.GetNextRetryTime().Format(time.RFC3339)
+			m.logger.Debugf("Skipping retry for %s until %s", id, tracker.GetNextRetryTime().Format(time.RFC3339))
+			return m.store.SaveStatus(status)
+		}
+
 		reason := retry.ClassifyError(stdErrors.New(status.Message))
 		retryResult, recordErr := tracker.RecordFailure(reason, status.Message)
 		if recordErr != nil {
