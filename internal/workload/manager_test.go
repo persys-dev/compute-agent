@@ -2,8 +2,13 @@ package workload
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
+	errors2 "github.com/persys/compute-agent/internal/errors"
+	"github.com/persys/compute-agent/internal/resources"
+	"github.com/persys/compute-agent/internal/retry"
 	"github.com/persys/compute-agent/internal/runtime"
 	"github.com/persys/compute-agent/pkg/models"
 	"github.com/sirupsen/logrus"
@@ -67,6 +72,19 @@ type MockRuntime struct {
 	mock.Mock
 }
 
+type runtimeWithMetadata struct {
+	*MockRuntime
+	metadata map[string]string
+	err      error
+}
+
+func (r *runtimeWithMetadata) StatusMetadata(ctx context.Context, id string) (map[string]string, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
+	return r.metadata, nil
+}
+
 func (m *MockRuntime) Create(ctx context.Context, workload *models.Workload) error {
 	args := m.Called(ctx, workload)
 	return args.Error(0)
@@ -111,16 +129,16 @@ func TestApplyWorkload_NewWorkload(t *testing.T) {
 	// Setup
 	mockStore := new(MockStore)
 	mockRuntime := new(MockRuntime)
-	
+
 	runtimeMgr := runtime.NewManager()
 	mockRuntime.On("Type").Return(models.WorkloadTypeContainer)
 	runtimeMgr.Register(mockRuntime)
-	
+
 	logger := logrus.New()
 	logger.SetLevel(logrus.FatalLevel) // Suppress logs in tests
-	
+
 	manager := NewManager(mockStore, runtimeMgr, logger)
-	
+
 	// Create test workload
 	workload := &models.Workload{
 		ID:           "test-workload",
@@ -131,7 +149,7 @@ func TestApplyWorkload_NewWorkload(t *testing.T) {
 			"image": "nginx:latest",
 		},
 	}
-	
+
 	// Setup expectations
 	mockStore.On("GetWorkload", "test-workload").Return(nil, assert.AnError)
 	mockStore.On("SaveWorkload", mock.AnythingOfType("*models.Workload")).Return(nil)
@@ -141,18 +159,18 @@ func TestApplyWorkload_NewWorkload(t *testing.T) {
 		models.ActualStateRunning, "running", nil,
 	)
 	mockStore.On("SaveStatus", mock.AnythingOfType("*models.WorkloadStatus")).Return(nil)
-	
+
 	// Execute
 	ctx := context.Background()
 	status, skipped, err := manager.ApplyWorkload(ctx, workload)
-	
+
 	// Assert
 	assert.NoError(t, err)
 	assert.False(t, skipped)
 	assert.NotNil(t, status)
 	assert.Equal(t, "test-workload", status.ID)
 	assert.Equal(t, models.ActualStateRunning, status.ActualState)
-	
+
 	// Verify all expectations were met
 	mockStore.AssertExpectations(t)
 	mockRuntime.AssertExpectations(t)
@@ -162,16 +180,16 @@ func TestApplyWorkload_SameRevision_Skipped(t *testing.T) {
 	// Setup
 	mockStore := new(MockStore)
 	mockRuntime := new(MockRuntime)
-	
+
 	runtimeMgr := runtime.NewManager()
 	mockRuntime.On("Type").Return(models.WorkloadTypeContainer)
 	runtimeMgr.Register(mockRuntime)
-	
+
 	logger := logrus.New()
 	logger.SetLevel(logrus.FatalLevel)
-	
+
 	manager := NewManager(mockStore, runtimeMgr, logger)
-	
+
 	// Existing workload with same revision
 	existing := &models.Workload{
 		ID:           "test-workload",
@@ -182,7 +200,7 @@ func TestApplyWorkload_SameRevision_Skipped(t *testing.T) {
 			"image": "nginx:latest",
 		},
 	}
-	
+
 	existingStatus := &models.WorkloadStatus{
 		ID:           "test-workload",
 		Type:         models.WorkloadTypeContainer,
@@ -191,25 +209,25 @@ func TestApplyWorkload_SameRevision_Skipped(t *testing.T) {
 		ActualState:  models.ActualStateRunning,
 		Message:      "running",
 	}
-	
+
 	// Setup expectations
 	mockStore.On("GetWorkload", "test-workload").Return(existing, nil)
 	mockStore.On("GetStatus", "test-workload").Return(existingStatus, nil)
-	
+
 	// Execute - apply same workload again
 	ctx := context.Background()
 	status, skipped, err := manager.ApplyWorkload(ctx, existing)
-	
+
 	// Assert
 	assert.NoError(t, err)
 	assert.True(t, skipped)
 	assert.NotNil(t, status)
 	assert.Equal(t, "rev-1", status.RevisionID)
-	
+
 	// Verify no runtime operations were called (skipped)
 	mockRuntime.AssertNotCalled(t, "Create", mock.Anything, mock.Anything)
 	mockRuntime.AssertNotCalled(t, "Start", mock.Anything, mock.Anything)
-	
+
 	mockStore.AssertExpectations(t)
 }
 
@@ -217,16 +235,16 @@ func TestApplyWorkload_DifferentRevision_Recreated(t *testing.T) {
 	// Setup
 	mockStore := new(MockStore)
 	mockRuntime := new(MockRuntime)
-	
+
 	runtimeMgr := runtime.NewManager()
 	mockRuntime.On("Type").Return(models.WorkloadTypeContainer)
 	runtimeMgr.Register(mockRuntime)
-	
+
 	logger := logrus.New()
 	logger.SetLevel(logrus.FatalLevel)
-	
+
 	manager := NewManager(mockStore, runtimeMgr, logger)
-	
+
 	// Existing workload with different revision
 	existing := &models.Workload{
 		ID:           "test-workload",
@@ -237,7 +255,7 @@ func TestApplyWorkload_DifferentRevision_Recreated(t *testing.T) {
 			"image": "nginx:1.20",
 		},
 	}
-	
+
 	// New workload with updated revision
 	updated := &models.Workload{
 		ID:           "test-workload",
@@ -248,7 +266,7 @@ func TestApplyWorkload_DifferentRevision_Recreated(t *testing.T) {
 			"image": "nginx:1.21",
 		},
 	}
-	
+
 	// Setup expectations
 	mockStore.On("GetWorkload", "test-workload").Return(existing, nil)
 	mockRuntime.On("Delete", mock.Anything, "test-workload").Return(nil)
@@ -259,20 +277,20 @@ func TestApplyWorkload_DifferentRevision_Recreated(t *testing.T) {
 		models.ActualStateRunning, "running", nil,
 	)
 	mockStore.On("SaveStatus", mock.AnythingOfType("*models.WorkloadStatus")).Return(nil)
-	
+
 	// Execute
 	ctx := context.Background()
 	status, skipped, err := manager.ApplyWorkload(ctx, updated)
-	
+
 	// Assert
 	assert.NoError(t, err)
 	assert.False(t, skipped)
 	assert.NotNil(t, status)
 	assert.Equal(t, "rev-2", status.RevisionID)
-	
+
 	// Verify delete was called (recreation)
 	mockRuntime.AssertCalled(t, "Delete", mock.Anything, "test-workload")
-	
+
 	mockStore.AssertExpectations(t)
 	mockRuntime.AssertExpectations(t)
 }
@@ -281,33 +299,33 @@ func TestDeleteWorkload(t *testing.T) {
 	// Setup
 	mockStore := new(MockStore)
 	mockRuntime := new(MockRuntime)
-	
+
 	runtimeMgr := runtime.NewManager()
 	mockRuntime.On("Type").Return(models.WorkloadTypeContainer)
 	runtimeMgr.Register(mockRuntime)
-	
+
 	logger := logrus.New()
 	logger.SetLevel(logrus.FatalLevel)
-	
+
 	manager := NewManager(mockStore, runtimeMgr, logger)
-	
+
 	workload := &models.Workload{
 		ID:   "test-workload",
 		Type: models.WorkloadTypeContainer,
 	}
-	
+
 	// Setup expectations
 	mockStore.On("GetWorkload", "test-workload").Return(workload, nil)
 	mockRuntime.On("Delete", mock.Anything, "test-workload").Return(nil)
 	mockStore.On("DeleteWorkload", "test-workload").Return(nil)
-	
+
 	// Execute
 	ctx := context.Background()
 	err := manager.DeleteWorkload(ctx, "test-workload")
-	
+
 	// Assert
 	assert.NoError(t, err)
-	
+
 	mockStore.AssertExpectations(t)
 	mockRuntime.AssertExpectations(t)
 }
@@ -316,29 +334,29 @@ func TestReconcileWorkload_StartStopped(t *testing.T) {
 	// Setup
 	mockStore := new(MockStore)
 	mockRuntime := new(MockRuntime)
-	
+
 	runtimeMgr := runtime.NewManager()
 	mockRuntime.On("Type").Return(models.WorkloadTypeContainer)
 	runtimeMgr.Register(mockRuntime)
-	
+
 	logger := logrus.New()
 	logger.SetLevel(logrus.FatalLevel)
-	
+
 	manager := NewManager(mockStore, runtimeMgr, logger)
-	
+
 	workload := &models.Workload{
 		ID:           "test-workload",
 		Type:         models.WorkloadTypeContainer,
 		DesiredState: models.DesiredStateRunning,
 	}
-	
+
 	status := &models.WorkloadStatus{
 		ID:           "test-workload",
 		Type:         models.WorkloadTypeContainer,
 		DesiredState: models.DesiredStateRunning,
 		ActualState:  models.ActualStateStopped,
 	}
-	
+
 	// Setup expectations
 	mockStore.On("GetWorkload", "test-workload").Return(workload, nil)
 	mockStore.On("GetStatus", "test-workload").Return(status, nil)
@@ -350,17 +368,226 @@ func TestReconcileWorkload_StartStopped(t *testing.T) {
 		models.ActualStateRunning, "running", nil,
 	).Once()
 	mockStore.On("SaveStatus", mock.AnythingOfType("*models.WorkloadStatus")).Return(nil)
-	
+
 	// Execute
 	ctx := context.Background()
 	err := manager.ReconcileWorkload(ctx, "test-workload")
-	
+
 	// Assert
 	assert.NoError(t, err)
-	
+
 	// Verify Start was called
 	mockRuntime.AssertCalled(t, "Start", mock.Anything, "test-workload")
-	
+
 	mockStore.AssertExpectations(t)
 	mockRuntime.AssertExpectations(t)
+}
+
+func TestApplyWorkload_ResourceUnavailable_FailsBeforeCreate(t *testing.T) {
+	// Setup
+	mockStore := new(MockStore)
+	mockRuntime := new(MockRuntime)
+
+	runtimeMgr := runtime.NewManager()
+	mockRuntime.On("Type").Return(models.WorkloadTypeContainer)
+	runtimeMgr.Register(mockRuntime)
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.FatalLevel)
+
+	manager := NewManager(mockStore, runtimeMgr, logger)
+	manager.resourceMonitor = nil // ensure default path first
+
+	workload := &models.Workload{
+		ID:           "test-workload",
+		Type:         models.WorkloadTypeContainer,
+		RevisionID:   "rev-1",
+		DesiredState: models.DesiredStateRunning,
+		Spec: map[string]interface{}{
+			"image": "nginx:latest",
+		},
+	}
+
+	// Configure existing lookup
+	mockStore.On("GetWorkload", "test-workload").Return(nil, errors.New("not found"))
+
+	// Attach a real monitor with impossible thresholds so it fails deterministically
+	manager.SetResourceMonitor(resources.NewMonitor(&resources.Thresholds{
+		MemoryThreshold: -1,
+		CPUThreshold:    -1,
+		DiskThreshold:   -1,
+	}, logger))
+
+	// Execute
+	ctx := context.Background()
+	status, skipped, err := manager.ApplyWorkload(ctx, workload)
+
+	// Assert
+	assert.Error(t, err)
+	assert.Nil(t, status)
+	assert.False(t, skipped)
+
+	var workloadErr *errors2.WorkloadError
+	assert.ErrorAs(t, err, &workloadErr)
+	assert.Equal(t, errors2.ErrCodeResourceQuotaExceeded, workloadErr.Code)
+
+	// Verify no create/start or save operations were called
+	mockStore.AssertNotCalled(t, "SaveWorkload", mock.Anything)
+	mockRuntime.AssertNotCalled(t, "Create", mock.Anything, mock.Anything)
+	mockRuntime.AssertNotCalled(t, "Start", mock.Anything, mock.Anything)
+
+	mockStore.AssertExpectations(t)
+}
+
+func TestReconcileWorkload_FailedWorkload_RespectsRetryBackoff(t *testing.T) {
+	mockStore := new(MockStore)
+	mockRuntime := new(MockRuntime)
+
+	runtimeMgr := runtime.NewManager()
+	mockRuntime.On("Type").Return(models.WorkloadTypeContainer)
+	runtimeMgr.Register(mockRuntime)
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.FatalLevel)
+
+	manager := NewManager(mockStore, runtimeMgr, logger)
+	manager.SetRetryPolicy(&retry.RetryPolicy{
+		MaxAttempts:        3,
+		InitialDelay:       1 * time.Hour,
+		MaxDelay:           1 * time.Hour,
+		BackoffMultiplier:  2,
+		OnlyRetryTransient: true,
+	})
+
+	workload := &models.Workload{
+		ID:           "failed-workload",
+		Type:         models.WorkloadTypeContainer,
+		DesiredState: models.DesiredStateRunning,
+	}
+
+	status := &models.WorkloadStatus{
+		ID:           "failed-workload",
+		Type:         models.WorkloadTypeContainer,
+		DesiredState: models.DesiredStateRunning,
+		ActualState:  models.ActualStateFailed,
+		Message:      "network timeout while pulling image",
+	}
+
+	mockStore.On("GetWorkload", "failed-workload").Return(workload, nil)
+	mockStore.On("GetStatus", "failed-workload").Return(status, nil)
+	mockRuntime.On("Status", mock.Anything, "failed-workload").Return(
+		models.ActualStateFailed, "network timeout while pulling image", nil,
+	).Once()
+
+	mockStore.On("SaveStatus", mock.MatchedBy(func(s *models.WorkloadStatus) bool {
+		if s.Metadata == nil {
+			return false
+		}
+		return s.Metadata["retry_attempts"] == "1" && s.Metadata["failure_reason"] == "IMAGE_PULL_TIMEOUT"
+	})).Return(nil).Once()
+
+	err := manager.ReconcileWorkload(context.Background(), "failed-workload")
+	assert.NoError(t, err)
+
+	mockRuntime.AssertNotCalled(t, "Delete", mock.Anything, "failed-workload")
+	mockRuntime.AssertNotCalled(t, "Create", mock.Anything, mock.Anything)
+	mockRuntime.AssertNotCalled(t, "Start", mock.Anything, "failed-workload")
+	mockStore.AssertExpectations(t)
+}
+
+func TestReconcileWorkload_FailedWorkload_DoesNotConsumeAttemptsBeforeBackoffWindow(t *testing.T) {
+	mockStore := new(MockStore)
+	mockRuntime := new(MockRuntime)
+
+	runtimeMgr := runtime.NewManager()
+	mockRuntime.On("Type").Return(models.WorkloadTypeContainer)
+	runtimeMgr.Register(mockRuntime)
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.FatalLevel)
+
+	manager := NewManager(mockStore, runtimeMgr, logger)
+	manager.SetRetryPolicy(&retry.RetryPolicy{
+		MaxAttempts:        3,
+		InitialDelay:       1 * time.Hour,
+		MaxDelay:           1 * time.Hour,
+		BackoffMultiplier:  2,
+		OnlyRetryTransient: true,
+	})
+
+	workload := &models.Workload{
+		ID:           "failed-workload",
+		Type:         models.WorkloadTypeContainer,
+		DesiredState: models.DesiredStateRunning,
+	}
+
+	status := &models.WorkloadStatus{
+		ID:           "failed-workload",
+		Type:         models.WorkloadTypeContainer,
+		DesiredState: models.DesiredStateRunning,
+		ActualState:  models.ActualStateFailed,
+		Message:      "network timeout while pulling image",
+	}
+
+	mockStore.On("GetWorkload", "failed-workload").Return(workload, nil).Twice()
+	mockStore.On("GetStatus", "failed-workload").Return(status, nil).Twice()
+	mockRuntime.On("Status", mock.Anything, "failed-workload").Return(
+		models.ActualStateFailed, "network timeout while pulling image", nil,
+	).Twice()
+
+	mockStore.On("SaveStatus", mock.MatchedBy(func(s *models.WorkloadStatus) bool {
+		if s.Metadata == nil {
+			return false
+		}
+		return s.Metadata["retry_attempts"] == "1"
+	})).Return(nil).Twice()
+
+	err := manager.ReconcileWorkload(context.Background(), "failed-workload")
+	assert.NoError(t, err)
+
+	err = manager.ReconcileWorkload(context.Background(), "failed-workload")
+	assert.NoError(t, err)
+
+	mockRuntime.AssertNotCalled(t, "Delete", mock.Anything, "failed-workload")
+	mockRuntime.AssertNotCalled(t, "Create", mock.Anything, mock.Anything)
+	mockRuntime.AssertNotCalled(t, "Start", mock.Anything, "failed-workload")
+	mockStore.AssertExpectations(t)
+}
+
+func TestGetStatus_SurfacesRuntimeMetadata(t *testing.T) {
+	mockStore := new(MockStore)
+	baseRuntime := new(MockRuntime)
+	wrappedRuntime := &runtimeWithMetadata{
+		MockRuntime: baseRuntime,
+		metadata: map[string]string{
+			"vm.primary_ip":   "10.0.0.5",
+			"vm.ip_addresses": "10.0.0.5,fd00::5",
+		},
+	}
+
+	runtimeMgr := runtime.NewManager()
+	baseRuntime.On("Type").Return(models.WorkloadTypeVM)
+	runtimeMgr.Register(wrappedRuntime)
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.FatalLevel)
+	manager := NewManager(mockStore, runtimeMgr, logger)
+
+	workload := &models.Workload{ID: "vm-1", Type: models.WorkloadTypeVM}
+	status := &models.WorkloadStatus{ID: "vm-1", Type: models.WorkloadTypeVM, Metadata: map[string]string{}}
+
+	mockStore.On("GetStatus", "vm-1").Return(status, nil)
+	mockStore.On("GetWorkload", "vm-1").Return(workload, nil)
+	baseRuntime.On("Status", mock.Anything, "vm-1").Return(models.ActualStateRunning, "running", nil)
+	mockStore.On("SaveStatus", mock.MatchedBy(func(s *models.WorkloadStatus) bool {
+		return s.Metadata["vm.primary_ip"] == "10.0.0.5"
+	})).Return(nil)
+
+	got, err := manager.GetStatus(context.Background(), "vm-1")
+	assert.NoError(t, err)
+	assert.Equal(t, "10.0.0.5", got.Metadata["vm.primary_ip"])
+	assert.Equal(t, "10.0.0.5,fd00::5", got.Metadata["vm.ip_addresses"])
+
+	mockStore.AssertExpectations(t)
+	baseRuntime.AssertExpectations(t)
 }

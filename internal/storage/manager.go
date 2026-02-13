@@ -2,6 +2,8 @@ package storage
 
 import (
 	"fmt"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -79,6 +81,55 @@ func NewManager() *Manager {
 	}
 }
 
+func (m *Manager) validatePoolConfig(pool *Pool) error {
+	switch pool.Type {
+	case PoolTypeLocal:
+		if strings.TrimSpace(pool.Config["path"]) == "" {
+			return fmt.Errorf("local pool requires config.path")
+		}
+	case PoolTypeNFS:
+		if strings.TrimSpace(pool.Config["server"]) == "" || strings.TrimSpace(pool.Config["export"]) == "" {
+			return fmt.Errorf("nfs pool requires config.server and config.export")
+		}
+	case PoolTypeISCSI:
+		if strings.TrimSpace(pool.Config["target"]) == "" || strings.TrimSpace(pool.Config["portal"]) == "" {
+			return fmt.Errorf("iscsi pool requires config.target and config.portal")
+		}
+	case PoolTypeLVM:
+		if strings.TrimSpace(pool.Config["vg_name"]) == "" {
+			return fmt.Errorf("lvm pool requires config.vg_name")
+		}
+	case PoolTypeGluster:
+		if strings.TrimSpace(pool.Config["volume"]) == "" {
+			return fmt.Errorf("gluster pool requires config.volume")
+		}
+	default:
+		return fmt.Errorf("unsupported pool type: %s", pool.Type)
+	}
+	return nil
+}
+
+func buildAllocationPath(pool *Pool, diskID string) string {
+	switch pool.Type {
+	case PoolTypeLocal:
+		base := strings.TrimSpace(pool.Config["path"])
+		if base == "" {
+			base = "/var/lib/persys/storage"
+		}
+		return filepath.Join(base, diskID)
+	case PoolTypeNFS:
+		return fmt.Sprintf("nfs://%s/%s/%s", pool.Config["server"], strings.TrimPrefix(pool.Config["export"], "/"), diskID)
+	case PoolTypeISCSI:
+		return fmt.Sprintf("iscsi://%s/%s/%s", pool.Config["portal"], pool.Config["target"], diskID)
+	case PoolTypeLVM:
+		return fmt.Sprintf("/dev/%s/%s", pool.Config["vg_name"], diskID)
+	case PoolTypeGluster:
+		return fmt.Sprintf("gluster://%s/%s", pool.Config["volume"], diskID)
+	default:
+		return diskID
+	}
+}
+
 // CreatePool creates a new storage pool
 func (m *Manager) CreatePool(pool *Pool) error {
 	m.mu.Lock()
@@ -106,6 +157,29 @@ func (m *Manager) CreatePool(pool *Pool) error {
 
 	if pool.Config == nil {
 		pool.Config = make(map[string]string)
+	}
+
+	if err := m.validatePoolConfig(pool); err != nil {
+		return err
+	}
+
+	if pool.WarningThreshold <= 0 {
+		pool.WarningThreshold = 80
+	}
+	if pool.WarningThreshold > 100 {
+		pool.WarningThreshold = 100
+	}
+
+	if pool.UUID == "" {
+		pool.UUID = fmt.Sprintf("pool-%d", time.Now().UnixNano())
+	}
+
+	if !pool.Active {
+		pool.Active = true
+	}
+	pool.Healthy = true
+	if strings.TrimSpace(pool.Status) == "" {
+		pool.Status = "healthy"
 	}
 
 	if pool.Labels == nil {
@@ -167,6 +241,10 @@ func (m *Manager) DeletePool(name string) error {
 		}
 	}
 
+	if _, exists := m.pools[name]; !exists {
+		return fmt.Errorf("pool %s not found", name)
+	}
+
 	delete(m.pools, name)
 	return nil
 }
@@ -198,11 +276,16 @@ func (m *Manager) AllocateDisk(poolName string, sizeGB int64, format string) (*D
 
 	// Create allocation
 	diskID := fmt.Sprintf("disk-%d", time.Now().UnixNano())
+	if strings.TrimSpace(format) == "" {
+		format = "qcow2"
+	}
+
 	allocation := &DiskAllocation{
 		ID:        diskID,
 		PoolName:  poolName,
 		Name:      diskID,
 		SizeGB:    sizeGB,
+		Path:      buildAllocationPath(pool, diskID),
 		Format:    format,
 		CreatedAt: time.Now(),
 	}
@@ -218,6 +301,8 @@ func (m *Manager) AllocateDisk(poolName string, sizeGB int64, format string) (*D
 	utilizationPercent := float64(pool.AllocatedSizeGB) / float64(pool.TotalSizeGB) * 100
 	if int(utilizationPercent) >= pool.WarningThreshold {
 		pool.Status = "warning: utilization above threshold"
+	} else {
+		pool.Status = "healthy"
 	}
 
 	return allocation, nil

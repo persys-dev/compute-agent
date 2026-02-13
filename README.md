@@ -312,8 +312,14 @@ make build
 # Build for Linux (useful for macOS/Windows dev)
 make build-linux
 
-# Run tests
+# Run unit + end-to-end tests
 make test
+
+# Run only unit tests
+make test-unit
+
+# Run only end-to-end tests
+make test-e2e
 
 # Format code
 make fmt
@@ -321,6 +327,16 @@ make fmt
 # Run linters
 make lint
 ```
+
+
+### CI/CD
+
+A GitHub Actions workflow is available at `.github/workflows/ci.yml` and runs:
+
+- Unit tests via `make test-unit`
+- End-to-end tests via `make test-e2e`
+
+Both jobs run on pull requests and pushes to the default development branches.
 
 ### Docker Build
 

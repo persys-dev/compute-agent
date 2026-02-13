@@ -1,4 +1,4 @@
-.PHONY: all build proto clean test run docker-build docker-push install deps fmt lint
+.PHONY: all build proto clean test test-unit test-e2e test-ci run docker-build docker-push install deps fmt lint
 
 # Build variables
 BINARY_NAME=persys-agent
@@ -56,8 +56,22 @@ clean:
 	rm -rf $(PKG_DIR)
 
 test:
-	@echo "==> Running tests..."
-	$(GOTEST) -v -race -coverprofile=coverage.txt -covermode=atomic ./...
+	@echo "==> Running all tests..."
+	$(MAKE) test-unit
+	$(MAKE) test-e2e
+
+test-unit:
+	@echo "==> Running unit tests..."
+	$(GOTEST) -v -race -coverprofile=coverage.txt -covermode=atomic $$(go list ./... | grep -v '/test/e2e')
+
+test-e2e:
+	@echo "==> Running end-to-end tests..."
+	$(GOTEST) -v ./test/e2e/...
+
+test-ci:
+	@echo "==> Running CI test suite..."
+	$(MAKE) test-unit
+	$(MAKE) test-e2e
 
 test-integration:
 	@echo "==> Running integration tests..."

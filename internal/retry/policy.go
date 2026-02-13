@@ -317,14 +317,20 @@ func isSpecError(msg string) bool {
 }
 
 func contains(str string, keywords ...string) bool {
+	str = strings.ToLower(str)
+	for _, keyword := range keywords {
+		if strings.Contains(str, strings.ToLower(keyword)) {
 	str = strings.ToLower(fmt.Sprintf(" %s ", str)) // Add padding for word boundaries
 	for _, keyword := range keywords {
 		if containsHelper(str, strings.ToLower(keyword)) {
 			return true
+			}
 		}
 	}
-	return false
 }
+	return false
+}	
+
 
 func containsHelper(haystack, needle string) bool {
 	return strings.Contains(haystack, needle)

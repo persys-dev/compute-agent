@@ -11,27 +11,33 @@ import (
 type Runtime interface {
 	// Create creates a new workload
 	Create(ctx context.Context, workload *models.Workload) error
-	
+
 	// Start starts a workload
 	Start(ctx context.Context, id string) error
-	
+
 	// Stop stops a workload
 	Stop(ctx context.Context, id string) error
-	
+
 	// Delete removes a workload
 	Delete(ctx context.Context, id string) error
-	
+
 	// Status retrieves workload status
 	Status(ctx context.Context, id string) (models.ActualState, string, error)
-	
+
 	// List returns all workloads managed by this runtime
 	List(ctx context.Context) ([]string, error)
-	
+
 	// Type returns the runtime type
 	Type() models.WorkloadType
-	
+
 	// Healthy checks if the runtime is operational
 	Healthy(ctx context.Context) error
+}
+
+// StatusMetadataProvider is an optional runtime extension for surfacing additional status details.
+// Implementations can expose metadata such as VM IP addresses, interfaces, or credentials.
+type StatusMetadataProvider interface {
+	StatusMetadata(ctx context.Context, id string) (map[string]string, error)
 }
 
 // Manager coordinates multiple runtimes
@@ -69,7 +75,7 @@ func (m *Manager) IsEnabled(workloadType models.WorkloadType) bool {
 // HealthCheck checks all registered runtimes
 func (m *Manager) HealthCheck(ctx context.Context) map[string]string {
 	results := make(map[string]string)
-	
+
 	for typ, runtime := range m.runtimes {
 		if err := runtime.Healthy(ctx); err != nil {
 			results[string(typ)] = fmt.Sprintf("unhealthy: %v", err)
@@ -77,6 +83,6 @@ func (m *Manager) HealthCheck(ctx context.Context) map[string]string {
 			results[string(typ)] = "healthy"
 		}
 	}
-	
+
 	return results
 }
