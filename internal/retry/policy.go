@@ -324,10 +324,13 @@ func contains(str string, keywords ...string) bool {
 	for _, keyword := range keywords {
 		if containsHelper(str, strings.ToLower(keyword)) {
 			return true
+			}
 		}
 	}
-	return false
 }
+	return false
+}	
+
 
 func containsHelper(haystack, needle string) bool {
 	return strings.Contains(haystack, needle)

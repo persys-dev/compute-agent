@@ -1,6 +1,9 @@
 package retry
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestClassifyError_UsesKeywordMatching(t *testing.T) {
 	reason := ClassifyError(assertErr{"network timeout connecting to host"})
@@ -12,10 +15,6 @@ func TestClassifyError_UsesKeywordMatching(t *testing.T) {
 type assertErr struct{ msg string }
 
 func (e assertErr) Error() string { return e.msg }
-import (
-	"errors"
-	"testing"
-)
 
 func TestContains_MatchesKeyword(t *testing.T) {
 	if !contains("failed to pull image manifest", "manifest") {
