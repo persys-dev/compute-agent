@@ -410,6 +410,11 @@ func TestApplyWorkload_ResourceUnavailable_FailsBeforeCreate(t *testing.T) {
 
 	// Configure existing lookup
 	mockStore.On("GetWorkload", "test-workload").Return(nil, errors.New("not found"))
+	mockStore.On("SaveWorkload", mock.AnythingOfType("*models.Workload")).Return(nil).Once()
+	mockStore.On("GetStatus", "test-workload").Return(nil, errors.New("not found")).Once()
+	mockStore.On("SaveStatus", mock.MatchedBy(func(s *models.WorkloadStatus) bool {
+		return s.ID == "test-workload" && s.ActualState == models.ActualStateFailed
+	})).Return(nil).Once()
 
 	// Attach a real monitor with impossible thresholds so it fails deterministically
 	manager.SetResourceMonitor(resources.NewMonitor(&resources.Thresholds{
@@ -431,12 +436,56 @@ func TestApplyWorkload_ResourceUnavailable_FailsBeforeCreate(t *testing.T) {
 	assert.ErrorAs(t, err, &workloadErr)
 	assert.Equal(t, errors2.ErrCodeResourceQuotaExceeded, workloadErr.Code)
 
-	// Verify no create/start or save operations were called
-	mockStore.AssertNotCalled(t, "SaveWorkload", mock.Anything)
+	// Verify no runtime operations were called
 	mockRuntime.AssertNotCalled(t, "Create", mock.Anything, mock.Anything)
 	mockRuntime.AssertNotCalled(t, "Start", mock.Anything, mock.Anything)
 
 	mockStore.AssertExpectations(t)
+}
+
+func TestApplyWorkload_CreateFailure_PersistsFailedStatus(t *testing.T) {
+	mockStore := new(MockStore)
+	mockRuntime := new(MockRuntime)
+
+	runtimeMgr := runtime.NewManager()
+	mockRuntime.On("Type").Return(models.WorkloadTypeContainer)
+	runtimeMgr.Register(mockRuntime)
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.FatalLevel)
+	manager := NewManager(mockStore, runtimeMgr, logger)
+
+	workload := &models.Workload{
+		ID:           "failed-create",
+		Type:         models.WorkloadTypeContainer,
+		RevisionID:   "rev-1",
+		DesiredState: models.DesiredStateRunning,
+		Spec:         map[string]interface{}{"image": "nginx:latest"},
+	}
+
+	mockStore.On("GetWorkload", "failed-create").Return(nil, errors.New("not found"))
+	mockStore.On("SaveWorkload", mock.AnythingOfType("*models.Workload")).Return(nil)
+	mockStore.On("SaveStatus", mock.MatchedBy(func(s *models.WorkloadStatus) bool {
+		return s.ID == "failed-create" && s.ActualState == models.ActualStatePending
+	})).Return(nil).Once()
+	mockRuntime.On("Create", mock.Anything, workload).Return(errors.New("image pull failed")).Once()
+	mockStore.On("GetStatus", "failed-create").Return(&models.WorkloadStatus{
+		ID:           "failed-create",
+		Type:         models.WorkloadTypeContainer,
+		DesiredState: models.DesiredStateRunning,
+		ActualState:  models.ActualStatePending,
+	}, nil).Once()
+	mockStore.On("SaveStatus", mock.MatchedBy(func(s *models.WorkloadStatus) bool {
+		return s.ID == "failed-create" && s.ActualState == models.ActualStateFailed
+	})).Return(nil).Once()
+
+	status, skipped, err := manager.ApplyWorkload(context.Background(), workload)
+	assert.Error(t, err)
+	assert.Nil(t, status)
+	assert.False(t, skipped)
+	mockStore.AssertNotCalled(t, "DeleteWorkload", "failed-create")
+	mockStore.AssertExpectations(t)
+	mockRuntime.AssertExpectations(t)
 }
 
 func TestReconcileWorkload_FailedWorkload_RespectsRetryBackoff(t *testing.T) {
@@ -552,6 +601,61 @@ func TestReconcileWorkload_FailedWorkload_DoesNotConsumeAttemptsBeforeBackoffWin
 	mockRuntime.AssertNotCalled(t, "Create", mock.Anything, mock.Anything)
 	mockRuntime.AssertNotCalled(t, "Start", mock.Anything, "failed-workload")
 	mockStore.AssertExpectations(t)
+}
+
+func TestReconcileWorkload_RecreatesMissingRuntimeWorkload(t *testing.T) {
+	mockStore := new(MockStore)
+	mockRuntime := new(MockRuntime)
+
+	runtimeMgr := runtime.NewManager()
+	mockRuntime.On("Type").Return(models.WorkloadTypeContainer)
+	runtimeMgr.Register(mockRuntime)
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.FatalLevel)
+
+	manager := NewManager(mockStore, runtimeMgr, logger)
+	manager.SetRetryPolicy(&retry.RetryPolicy{
+		MaxAttempts:        3,
+		InitialDelay:       0,
+		MaxDelay:           0,
+		BackoffMultiplier:  1,
+		OnlyRetryTransient: false,
+	})
+
+	workload := &models.Workload{
+		ID:           "missing-workload",
+		Type:         models.WorkloadTypeContainer,
+		DesiredState: models.DesiredStateRunning,
+	}
+
+	status := &models.WorkloadStatus{
+		ID:           "missing-workload",
+		Type:         models.WorkloadTypeContainer,
+		DesiredState: models.DesiredStateRunning,
+		ActualState:  models.ActualStateUnknown,
+		Message:      "container not found",
+	}
+
+	mockStore.On("GetWorkload", "missing-workload").Return(workload, nil)
+	mockStore.On("GetStatus", "missing-workload").Return(status, nil)
+	mockRuntime.On("Status", mock.Anything, "missing-workload").Return(
+		models.ActualStateUnknown, "container not found", nil,
+	).Once()
+	mockRuntime.On("Delete", mock.Anything, "missing-workload").Return(nil).Once()
+	mockRuntime.On("Create", mock.Anything, workload).Return(nil).Once()
+	mockRuntime.On("Start", mock.Anything, "missing-workload").Return(nil).Once()
+	mockRuntime.On("Status", mock.Anything, "missing-workload").Return(
+		models.ActualStateRunning, "running", nil,
+	).Once()
+	mockStore.On("SaveStatus", mock.MatchedBy(func(s *models.WorkloadStatus) bool {
+		return s.ActualState == models.ActualStateRunning
+	})).Return(nil).Once()
+
+	err := manager.ReconcileWorkload(context.Background(), "missing-workload")
+	assert.NoError(t, err)
+	mockStore.AssertExpectations(t)
+	mockRuntime.AssertExpectations(t)
 }
 
 func TestGetStatus_SurfacesRuntimeMetadata(t *testing.T) {
