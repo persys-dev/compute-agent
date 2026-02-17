@@ -24,6 +24,7 @@ const (
 	AgentService_GetWorkloadStatus_FullMethodName = "/persys.agent.v1.AgentService/GetWorkloadStatus"
 	AgentService_ListWorkloads_FullMethodName     = "/persys.agent.v1.AgentService/ListWorkloads"
 	AgentService_HealthCheck_FullMethodName       = "/persys.agent.v1.AgentService/HealthCheck"
+	AgentService_ListActions_FullMethodName       = "/persys.agent.v1.AgentService/ListActions"
 )
 
 // AgentServiceClient is the client API for AgentService service.
@@ -42,6 +43,8 @@ type AgentServiceClient interface {
 	ListWorkloads(ctx context.Context, in *ListWorkloadsRequest, opts ...grpc.CallOption) (*ListWorkloadsResponse, error)
 	// HealthCheck returns agent health status
 	HealthCheck(ctx context.Context, in *HealthCheckRequest, opts ...grpc.CallOption) (*HealthCheckResponse, error)
+	// ListActions returns action/task history tracked by the agent since startup
+	ListActions(ctx context.Context, in *ListActionsRequest, opts ...grpc.CallOption) (*ListActionsResponse, error)
 }
 
 type agentServiceClient struct {
@@ -102,6 +105,16 @@ func (c *agentServiceClient) HealthCheck(ctx context.Context, in *HealthCheckReq
 	return out, nil
 }
 
+func (c *agentServiceClient) ListActions(ctx context.Context, in *ListActionsRequest, opts ...grpc.CallOption) (*ListActionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListActionsResponse)
+	err := c.cc.Invoke(ctx, AgentService_ListActions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AgentServiceServer is the server API for AgentService service.
 // All implementations must embed UnimplementedAgentServiceServer
 // for forward compatibility.
@@ -118,6 +131,8 @@ type AgentServiceServer interface {
 	ListWorkloads(context.Context, *ListWorkloadsRequest) (*ListWorkloadsResponse, error)
 	// HealthCheck returns agent health status
 	HealthCheck(context.Context, *HealthCheckRequest) (*HealthCheckResponse, error)
+	// ListActions returns action/task history tracked by the agent since startup
+	ListActions(context.Context, *ListActionsRequest) (*ListActionsResponse, error)
 	mustEmbedUnimplementedAgentServiceServer()
 }
 
@@ -142,6 +157,9 @@ func (UnimplementedAgentServiceServer) ListWorkloads(context.Context, *ListWorkl
 }
 func (UnimplementedAgentServiceServer) HealthCheck(context.Context, *HealthCheckRequest) (*HealthCheckResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method HealthCheck not implemented")
+}
+func (UnimplementedAgentServiceServer) ListActions(context.Context, *ListActionsRequest) (*ListActionsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListActions not implemented")
 }
 func (UnimplementedAgentServiceServer) mustEmbedUnimplementedAgentServiceServer() {}
 func (UnimplementedAgentServiceServer) testEmbeddedByValue()                      {}
@@ -254,6 +272,24 @@ func _AgentService_HealthCheck_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AgentService_ListActions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListActionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).ListActions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentService_ListActions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).ListActions(ctx, req.(*ListActionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AgentService_ServiceDesc is the grpc.ServiceDesc for AgentService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -280,6 +316,10 @@ var AgentService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "HealthCheck",
 			Handler:    _AgentService_HealthCheck_Handler,
+		},
+		{
+			MethodName: "ListActions",
+			Handler:    _AgentService_ListActions_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
