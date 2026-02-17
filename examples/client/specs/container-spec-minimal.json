@@ -1,0 +1,16 @@
+{
+  "image": "busybox:1.36",
+  "command": [
+    "sh",
+    "-c",
+    "echo container-ok && sleep 300"
+  ],
+  "ports": [
+    {
+      "host_port": 18080,
+      "container_port": 8080,
+      "protocol": "tcp"
+    }
+  ]
+}
+
