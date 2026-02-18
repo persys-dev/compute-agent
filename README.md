@@ -141,6 +141,17 @@ The agent is configured via environment variables:
 |----------|---------|-------------|
 | `PERSYS_NODE_ID` | hostname | Unique node identifier |
 | `PERSYS_VERSION` | `dev` | Agent version |
+| `PERSYS_NODE_REGION` | `` | Node region label (ex: `us-east-1`) |
+| `PERSYS_NODE_ENV` | `` | Node environment label (ex: `prod`, `staging`) |
+| `PERSYS_NODE_LABELS` | `` | Extra labels as `key=value,key2=value2` |
+| `PERSYS_AGENT_GRPC_ENDPOINT` | auto-derived | Scheduler-reachable agent endpoint (`host:port`) |
+
+### Scheduler Control Plane
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PERSYS_SCHEDULER_ADDR` | `127.0.0.1:8085` | Scheduler gRPC control endpoint (`host:port`) |
+| `PERSYS_SCHEDULER_INSECURE` | `false` | Disable TLS for scheduler control client (testing only) |
 
 ## API Reference
 
