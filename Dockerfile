@@ -22,7 +22,6 @@ FROM debian:bookworm-slim AS runtime-base
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     docker.io \
-    docker-compose-plugin \
     qemu-utils \
     genisoimage \
     libvirt-clients \
