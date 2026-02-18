@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/persys/compute-agent/internal/node"
@@ -40,8 +41,17 @@ type Config struct {
 	LogLevel string
 
 	// Agent metadata
-	NodeID  string
-	Version string
+	NodeID     string
+	Version    string
+	NodeRegion string
+	NodeEnv    string
+	NodeLabels map[string]string
+
+	// Scheduler control-plane configuration
+	SchedulerAddr       string
+	SchedulerInsecure   bool
+	SchedulerTLSEnabled bool
+	AgentGRPCEndpoint   string
 }
 
 // Load reads configuration from environment variables with sensible defaults
@@ -76,9 +86,23 @@ func Load() (*Config, error) {
 		LogLevel: getEnv("PERSYS_LOG_LEVEL", "info"),
 
 		// Metadata
-		NodeID:  generateNodeID(),
-		Version: getEnv("PERSYS_VERSION", "dev"),
+		NodeID:     generateNodeID(),
+		Version:    getEnv("PERSYS_VERSION", "dev"),
+		NodeRegion: getEnv("PERSYS_NODE_REGION", ""),
+		NodeEnv:    getEnv("PERSYS_NODE_ENV", ""),
+
+		// Scheduler defaults
+		SchedulerAddr:       getEnv("PERSYS_SCHEDULER_ADDR", "127.0.0.1:8085"),
+		SchedulerInsecure:   getEnvAsBool("PERSYS_SCHEDULER_INSECURE", false),
+		SchedulerTLSEnabled: !getEnvAsBool("PERSYS_SCHEDULER_INSECURE", false),
+		AgentGRPCEndpoint:   getEnv("PERSYS_AGENT_GRPC_ENDPOINT", ""),
 	}
+
+	cfg.NodeLabels = parseNodeLabels(
+		cfg.NodeRegion,
+		cfg.NodeEnv,
+		getEnv("PERSYS_NODE_LABELS", ""),
+	)
 
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
@@ -105,6 +129,10 @@ func (c *Config) Validate() error {
 
 	if !c.DockerEnabled && !c.ComposeEnabled && !c.VMEnabled {
 		return fmt.Errorf("at least one runtime must be enabled")
+	}
+
+	if c.SchedulerAddr == "" {
+		return fmt.Errorf("scheduler address cannot be empty")
 	}
 
 	return nil
@@ -143,6 +171,36 @@ func getEnvAsDuration(key string, defaultValue time.Duration) time.Duration {
 		}
 	}
 	return defaultValue
+}
+
+func parseNodeLabels(region, env, labelsRaw string) map[string]string {
+	labels := make(map[string]string)
+
+	if region != "" {
+		labels["region"] = region
+	}
+	if env != "" {
+		labels["env"] = env
+	}
+
+	for _, pair := range strings.Split(labelsRaw, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		kv := strings.SplitN(pair, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(kv[0])
+		value := strings.TrimSpace(kv[1])
+		if key == "" || value == "" {
+			continue
+		}
+		labels[key] = value
+	}
+
+	return labels
 }
 
 func getHostname() string {
