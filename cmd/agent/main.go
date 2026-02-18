@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/persys/compute-agent/internal/config"
+	"github.com/persys/compute-agent/internal/control"
 	"github.com/persys/compute-agent/internal/garbage"
 	"github.com/persys/compute-agent/internal/grpc"
 	"github.com/persys/compute-agent/internal/metrics"
@@ -24,6 +26,9 @@ import (
 const version = "1.0.0"
 
 func main() {
+	standaloneMode := flag.Bool("standalone", false, "run agent without scheduler registration/heartbeat")
+	flag.Parse()
+
 	// Initialize logger
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.TextFormatter{
@@ -198,6 +203,18 @@ func main() {
 		}
 	}()
 
+	// Start scheduler control client loop in background unless standalone mode is enabled
+	var cancelControl context.CancelFunc
+	if *standaloneMode {
+		logger.Info("Standalone mode enabled: skipping scheduler registration and heartbeat loop")
+	} else {
+		controlClient := control.NewClient(cfg, workloadMgr, runtimeMgr, resourceMonitor, logger)
+		controlCtx, cancel := context.WithCancel(context.Background())
+		cancelControl = cancel
+		defer cancelControl()
+		go controlClient.Run(controlCtx)
+	}
+
 	// Wait for shutdown signal
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -219,6 +236,10 @@ func main() {
 
 	if reconciler != nil {
 		reconciler.Stop()
+	}
+
+	if cancelControl != nil {
+		cancelControl()
 	}
 
 	grpcServer.Stop()
