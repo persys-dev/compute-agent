@@ -1,10 +1,5 @@
 {
-  "image": "busybox:1.36",
-  "command": [
-    "sh",
-    "-c",
-    "echo container-ok && sleep 300"
-  ],
+  "image": "nginx:latest",
   "ports": [
     {
       "host_port": 18080,

@@ -1,10 +1,10 @@
 {
-  "name": "demo-vm",
+  "name": "persys-vm",
   "vcpus": 2,
-  "memory_mb": 4096,
+  "memory_mb": 2048,
   "disks": [
     {
-      "path": "/var/lib/libvirt/images/demo-vm.qcow2",
+      "path": "/var/lib/libvirt/images/persys-vm.qcow2",
       "device": "vda",
       "format": "qcow2",
       "size_gb": 30,
@@ -12,7 +12,7 @@
       "boot": false
     },
     {
-      "path": "/var/lib/libvirt/images/fedora-coreos-live.iso",
+      "path": "/var/lib/libvirt/images/iso/fedora-coreos-42.20250803.3.0-live-iso.x86_64.iso",
       "device": "hdc",
       "format": "raw",
       "size_gb": 0,
@@ -25,14 +25,9 @@
       "network": "default",
       "mac_address": "52:54:00:12:34:56",
       "ip_address": ""
-    },
-    {
-      "network": "default",
-      "mac_address": "52:54:00:12:34:57",
-      "ip_address": ""
     }
   ],
-  "cloud_init": "#cloud-config\nhostname: demo-vm\nmanage_etc_hosts: true\nusers:\n  - name: core\n    groups: [wheel]\n    sudo: [\"ALL=(ALL) NOPASSWD:ALL\"]\npackages:\n  - qemu-guest-agent\nruncmd:\n  - systemctl enable --now qemu-guest-agent\n  - echo \"cloud-init done\" > /tmp/cloud-init.done\n",
+  "cloud_init": "#cloud-config\nhostname: persys-vm\nmanage_etc_hosts: true\nusers:\n  - name: core\n    groups: [wheel]\n    sudo: [\"ALL=(ALL) NOPASSWD:ALL\"]\npackages:\n  - qemu-guest-agent\nruncmd:\n  - systemctl enable --now qemu-guest-agent\n  - echo \"cloud-init done\" > /tmp/cloud-init.done\n",
   "metadata": {
     "environment": "staging",
     "owner": "platform-team",
