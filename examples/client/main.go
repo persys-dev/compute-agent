@@ -247,6 +247,10 @@ func healthCheck(ctx context.Context, client pb.AgentServiceClient) {
 	for runtime, status := range resp.RuntimeStatus {
 		fmt.Printf("    %s: %s\n", runtime, status)
 	}
+
+	fmt.Printf("  CPU Utilization: %v\n", resp.CpuUtilization)
+	fmt.Printf("  Memory Utilization: %v\n", resp.MemoryUtilization)
+	fmt.Printf("  Disk Utilization: %v\n", resp.DiskUtilization)
 }
 
 func applyWorkload(ctx context.Context, client pb.AgentServiceClient, workloadID string, opts *applyOptions) {
