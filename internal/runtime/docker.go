@@ -10,6 +10,7 @@ import (
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
@@ -22,6 +23,11 @@ type DockerRuntime struct {
 	client *client.Client
 	logger *logrus.Entry
 }
+
+const (
+	managedLabelKey      = "persys.managed"
+	managedWorkloadIDKey = "persys.workload_id"
+)
 
 // NewDockerRuntime creates a new Docker runtime
 func NewDockerRuntime(endpoint string, logger *logrus.Logger) (*DockerRuntime, error) {
@@ -66,11 +72,19 @@ func (d *DockerRuntime) Create(ctx context.Context, workload *models.Workload) e
 	d.logger.Infof("Successfully pulled image: %s", spec.Image)
 
 	// Build container config
+	labels := make(map[string]string, len(spec.Labels)+2)
+	for k, v := range spec.Labels {
+		labels[k] = v
+	}
+	// Force ownership labels so GC/reconciliation only targets agent-managed containers.
+	labels[managedLabelKey] = "true"
+	labels[managedWorkloadIDKey] = workload.ID
+
 	containerConfig := &container.Config{
 		Image:  spec.Image,
 		Cmd:    spec.Command,
 		Env:    d.buildEnv(spec.Env),
-		Labels: spec.Labels,
+		Labels: labels,
 	}
 
 	if len(spec.Args) > 0 {
@@ -180,7 +194,13 @@ func (d *DockerRuntime) Status(ctx context.Context, id string) (models.ActualSta
 }
 
 func (d *DockerRuntime) List(ctx context.Context) ([]string, error) {
-	containers, err := d.client.ContainerList(ctx, container.ListOptions{All: true})
+	filter := filters.NewArgs()
+	filter.Add("label", managedLabelKey+"=true")
+
+	containers, err := d.client.ContainerList(ctx, container.ListOptions{
+		All:     true,
+		Filters: filter,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list containers: %w", err)
 	}
