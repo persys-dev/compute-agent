@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/persys/compute-agent/internal/config"
@@ -148,8 +150,9 @@ func (s *Server) ApplyWorkload(ctx context.Context, req *pb.ApplyWorkloadRequest
 	if s.taskQueue != nil {
 		taskID := fmt.Sprintf("apply-%s-%d", req.Id, time.Now().UnixNano())
 		t := &task.Task{
-			ID:   taskID,
-			Type: task.TaskTypeApplyWorkload,
+			ID:         taskID,
+			WorkloadID: req.Id,
+			Type:       task.TaskTypeApplyWorkload,
 		}
 
 		// Store workload in task for handler to access
@@ -169,6 +172,10 @@ func (s *Server) ApplyWorkload(ctx context.Context, req *pb.ApplyWorkloadRequest
 					ActualState: pb.ActualState_ACTUAL_STATE_PENDING,
 					Message:     "task pending execution",
 					UpdatedAt:   time.Now().Unix(),
+					Metadata: map[string]string{
+						"task_id":     taskID,
+						"task_status": string(task.TaskStatusPending),
+					},
 				},
 			}, nil
 		}
@@ -203,9 +210,10 @@ func (s *Server) DeleteWorkload(ctx context.Context, req *pb.DeleteWorkloadReque
 	if s.taskQueue != nil {
 		taskID := fmt.Sprintf("delete-%s-%d", req.Id, time.Now().UnixNano())
 		t := &task.Task{
-			ID:     taskID,
-			Type:   task.TaskTypeDeleteWorkload,
-			Result: req.Id,
+			ID:         taskID,
+			WorkloadID: req.Id,
+			Type:       task.TaskTypeDeleteWorkload,
+			Result:     req.Id,
 		}
 
 		err := s.taskQueue.Submit(t)
@@ -307,6 +315,68 @@ func (s *Server) HealthCheck(ctx context.Context, req *pb.HealthCheckRequest) (*
 		CpuUtilization:    cpuPercent,
 		DiskUtilization:   diskPercent,
 	}, nil
+}
+
+// ListActions returns task/action history tracked since agent startup.
+func (s *Server) ListActions(ctx context.Context, req *pb.ListActionsRequest) (*pb.ListActionsResponse, error) {
+	s.logClientInfo(ctx, "ListActions", req.GetWorkloadId())
+
+	if s.taskQueue == nil {
+		return &pb.ListActionsResponse{Actions: []*pb.AgentAction{}}, nil
+	}
+
+	snapshots := s.taskQueue.ListTaskSnapshots("")
+
+	workloadFilter := strings.TrimSpace(req.GetWorkloadId())
+	typeFilter := strings.TrimSpace(req.GetActionType())
+	statusFilter := strings.TrimSpace(req.GetStatus())
+	newestFirst := true
+	if !req.GetNewestFirst() {
+		newestFirst = false
+	}
+
+	filtered := make([]task.TaskSnapshot, 0, len(snapshots))
+	for _, item := range snapshots {
+		if workloadFilter != "" && item.WorkloadID != workloadFilter {
+			continue
+		}
+		if typeFilter != "" && string(item.Type) != typeFilter {
+			continue
+		}
+		if statusFilter != "" && string(item.Status) != statusFilter {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+
+	sort.Slice(filtered, func(i, j int) bool {
+		ti := filtered[i].CreatedAt
+		tj := filtered[j].CreatedAt
+		if newestFirst {
+			return ti.After(tj)
+		}
+		return ti.Before(tj)
+	})
+
+	if req.GetLimit() > 0 && int(req.GetLimit()) < len(filtered) {
+		filtered = filtered[:req.GetLimit()]
+	}
+
+	actions := make([]*pb.AgentAction, 0, len(filtered))
+	for _, item := range filtered {
+		actions = append(actions, &pb.AgentAction{
+			TaskId:     item.ID,
+			WorkloadId: item.WorkloadID,
+			ActionType: string(item.Type),
+			Status:     string(item.Status),
+			Error:      item.Error,
+			CreatedAt:  item.CreatedAt.Unix(),
+			StartedAt:  item.StartedAt.Unix(),
+			EndedAt:    item.EndedAt.Unix(),
+		})
+	}
+
+	return &pb.ListActionsResponse{Actions: actions}, nil
 }
 
 // Helper conversion functions

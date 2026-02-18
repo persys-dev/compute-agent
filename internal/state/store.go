@@ -65,7 +65,7 @@ func NewBoltStore(path string) (Store, error) {
 func (s *boltStore) SaveWorkload(workload *models.Workload) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte(workloadBucket))
-		
+
 		workload.UpdatedAt = time.Now()
 		if workload.CreatedAt.IsZero() {
 			workload.CreatedAt = workload.UpdatedAt
@@ -86,7 +86,7 @@ func (s *boltStore) GetWorkload(id string) (*models.Workload, error) {
 	err := s.db.View(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte(workloadBucket))
 		data := bucket.Get([]byte(id))
-		
+
 		if data == nil {
 			return fmt.Errorf("workload not found")
 		}
@@ -106,7 +106,7 @@ func (s *boltStore) DeleteWorkload(id string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		workloadBucket := tx.Bucket([]byte(workloadBucket))
 		statusBucket := tx.Bucket([]byte(statusBucket))
-		
+
 		// Delete both workload and status
 		if err := workloadBucket.Delete([]byte(id)); err != nil {
 			return err
@@ -120,7 +120,7 @@ func (s *boltStore) ListWorkloads() ([]*models.Workload, error) {
 
 	err := s.db.View(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte(workloadBucket))
-		
+
 		return bucket.ForEach(func(k, v []byte) error {
 			var workload models.Workload
 			if err := json.Unmarshal(v, &workload); err != nil {
@@ -141,7 +141,7 @@ func (s *boltStore) ListWorkloads() ([]*models.Workload, error) {
 func (s *boltStore) SaveStatus(status *models.WorkloadStatus) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte(statusBucket))
-		
+
 		status.UpdatedAt = time.Now()
 		if status.CreatedAt.IsZero() {
 			status.CreatedAt = status.UpdatedAt
@@ -162,7 +162,7 @@ func (s *boltStore) GetStatus(id string) (*models.WorkloadStatus, error) {
 	err := s.db.View(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte(statusBucket))
 		data := bucket.Get([]byte(id))
-		
+
 		if data == nil {
 			return fmt.Errorf("status not found")
 		}
@@ -183,7 +183,7 @@ func (s *boltStore) ListStatuses() ([]*models.WorkloadStatus, error) {
 
 	err := s.db.View(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte(statusBucket))
-		
+
 		return bucket.ForEach(func(k, v []byte) error {
 			var status models.WorkloadStatus
 			if err := json.Unmarshal(v, &status); err != nil {

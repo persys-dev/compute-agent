@@ -30,15 +30,28 @@ const (
 
 // Task represents an async operation
 type Task struct {
-	ID        string
-	Type      TaskType
-	Status    TaskStatus
-	Error     string
-	Result    interface{}
-	CreatedAt time.Time
-	StartedAt time.Time
-	EndedAt   time.Time
-	mu        sync.RWMutex
+	ID         string
+	WorkloadID string
+	Type       TaskType
+	Status     TaskStatus
+	Error      string
+	Result     interface{}
+	CreatedAt  time.Time
+	StartedAt  time.Time
+	EndedAt    time.Time
+	mu         sync.RWMutex
+}
+
+// TaskSnapshot is an immutable view of a task for external consumers.
+type TaskSnapshot struct {
+	ID         string
+	WorkloadID string
+	Type       TaskType
+	Status     TaskStatus
+	Error      string
+	CreatedAt  time.Time
+	StartedAt  time.Time
+	EndedAt    time.Time
 }
 
 // Handler is a function that executes a task
@@ -180,8 +193,14 @@ func (q *Queue) Submit(task *Task) error {
 		q.logger.Debugf("Task %s submitted (type: %s)", task.ID, task.Type)
 		return nil
 	case <-q.stopCh:
+		q.mu.Lock()
+		delete(q.tasks, task.ID)
+		q.mu.Unlock()
 		return fmt.Errorf("task queue is stopping")
 	default:
+		q.mu.Lock()
+		delete(q.tasks, task.ID)
+		q.mu.Unlock()
 		return fmt.Errorf("task queue is full, try again later")
 	}
 }
@@ -247,6 +266,32 @@ func (q *Queue) ListTasks(status TaskStatus) []*Task {
 		task.mu.RLock()
 		if task.Status == status {
 			result = append(result, task)
+		}
+		task.mu.RUnlock()
+	}
+
+	return result
+}
+
+// ListTaskSnapshots returns immutable task snapshots matching a status (or all if status is empty).
+func (q *Queue) ListTaskSnapshots(status TaskStatus) []TaskSnapshot {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
+	var result []TaskSnapshot
+	for _, task := range q.tasks {
+		task.mu.RLock()
+		if status == "" || task.Status == status {
+			result = append(result, TaskSnapshot{
+				ID:         task.ID,
+				WorkloadID: task.WorkloadID,
+				Type:       task.Type,
+				Status:     task.Status,
+				Error:      task.Error,
+				CreatedAt:  task.CreatedAt,
+				StartedAt:  task.StartedAt,
+				EndedAt:    task.EndedAt,
+			})
 		}
 		task.mu.RUnlock()
 	}

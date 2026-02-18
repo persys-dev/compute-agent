@@ -181,6 +181,10 @@ The agent is configured via environment variables. Here are the most important o
 # Server
 export PERSYS_GRPC_PORT=50051
 
+# Scheduler control plane
+export PERSYS_SCHEDULER_ADDR=127.0.0.1:8085
+export PERSYS_SCHEDULER_INSECURE=true  # use only for local testing
+
 # TLS
 export PERSYS_TLS_ENABLED=true
 export PERSYS_TLS_CERT=/path/to/agent.crt
@@ -192,6 +196,11 @@ export PERSYS_STATE_PATH=/var/lib/persys/state.db
 
 # Logging
 export PERSYS_LOG_LEVEL=info
+
+# Optional node metadata/labels advertised during RegisterNode
+export PERSYS_NODE_REGION=us-east-1
+export PERSYS_NODE_ENV=staging
+export PERSYS_NODE_LABELS=team=platform,zone=use1-az2
 ```
 
 ### Runtime Configuration

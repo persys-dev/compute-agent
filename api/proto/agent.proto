@@ -20,6 +20,9 @@ service AgentService {
   
   // HealthCheck returns agent health status
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+
+  // ListActions returns action/task history tracked by the agent since startup
+  rpc ListActions(ListActionsRequest) returns (ListActionsResponse);
 }
 
 message ApplyWorkloadRequest {
@@ -71,6 +74,29 @@ message HealthCheckResponse {
   double memory_utilization = 4;  // Memory utilization percentage (0-100)
   double cpu_utilization = 5;     // CPU utilization percentage (0-100)
   double disk_utilization = 6;    // Disk utilization percentage for root mount (0-100)
+}
+
+message ListActionsRequest {
+  string workload_id = 1; // optional filter
+  string action_type = 2; // optional filter: apply_workload, delete_workload, ...
+  string status = 3; // optional filter: pending, running, completed, failed
+  int32 limit = 4; // optional max number of actions (0 = all)
+  bool newest_first = 5; // if true sorts by created_at descending
+}
+
+message AgentAction {
+  string task_id = 1;
+  string workload_id = 2;
+  string action_type = 3;
+  string status = 4;
+  string error = 5;
+  int64 created_at = 6;
+  int64 started_at = 7;
+  int64 ended_at = 8;
+}
+
+message ListActionsResponse {
+  repeated AgentAction actions = 1;
 }
 
 enum WorkloadType {

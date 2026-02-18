@@ -144,6 +144,13 @@ func (c *Collector) collectOrphanedResources(ctx context.Context) int {
 		models.WorkloadTypeCompose,
 		models.WorkloadTypeVM,
 	} {
+		// VM runtime lists all domains on the host; without an ownership marker query,
+		// deleting "orphaned" VMs is unsafe and may remove non-agent resources.
+		if workloadType == models.WorkloadTypeVM {
+			c.logger.Debug("Skipping VM orphaned-resource GC due to unknown ownership scope")
+			continue
+		}
+
 		rt, err := c.runtimeMgr.GetRuntime(workloadType)
 		if err != nil {
 			continue // Runtime not available
@@ -289,6 +296,10 @@ func (c *Collector) GetStats(ctx context.Context) *Stats {
 		models.WorkloadTypeCompose,
 		models.WorkloadTypeVM,
 	} {
+		if workloadType == models.WorkloadTypeVM {
+			continue
+		}
+
 		rt, err := c.runtimeMgr.GetRuntime(workloadType)
 		if err != nil {
 			continue

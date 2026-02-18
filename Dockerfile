@@ -1,53 +1,43 @@
-# Build stage
-FROM golang:1.21-alpine AS builder
+# syntax=docker/dockerfile:1.7
 
-# Install build dependencies
-RUN apk add --no-cache git make protobuf protobuf-dev
+ARG GO_VERSION=1.24.4
+ARG VERSION=1.0.0
 
-WORKDIR /build
+FROM golang:${GO_VERSION}-bookworm AS builder
+WORKDIR /src
 
-# Copy go mod files
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
-# Copy source code
 COPY . .
 
-# Build the binary
-RUN make build-linux
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+    -o /out/persys-agent ./cmd/agent
 
-# Runtime stage
-FROM ubuntu:22.04
-
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y \
-    docker.io \
-    docker-compose \
-    qemu-kvm \
-    libvirt-daemon-system \
-    libvirt-clients \
+FROM debian:bookworm-slim AS runtime-base
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    docker.io \
+    qemu-utils \
+    genisoimage \
+    libvirt-clients \
     && rm -rf /var/lib/apt/lists/*
 
-# Create persys user
-RUN useradd -r -u 1000 -g 0 -m -s /bin/bash persys && \
+RUN useradd -r -u 1000 -g 0 -m -s /usr/sbin/nologin persys && \
     mkdir -p /var/lib/persys /etc/persys/certs && \
     chown -R persys:root /var/lib/persys /etc/persys
 
-# Copy binary from builder
-COPY --from=builder /build/bin/persys-agent-linux-amd64 /usr/local/bin/persys-agent
-RUN chmod +x /usr/local/bin/persys-agent
+COPY --from=builder /out/persys-agent /usr/local/bin/persys-agent
 
-# Set up volumes
 VOLUME ["/var/lib/persys", "/etc/persys"]
+EXPOSE 50051 8080
 
-# Expose gRPC port
-EXPOSE 50051
-
-# Run as persys user
 USER persys
 
-# Set default environment variables
 ENV PERSYS_STATE_PATH=/var/lib/persys/state.db \
     PERSYS_TLS_CERT=/etc/persys/certs/agent.crt \
     PERSYS_TLS_KEY=/etc/persys/certs/agent.key \
@@ -55,3 +45,15 @@ ENV PERSYS_STATE_PATH=/var/lib/persys/state.db \
     PERSYS_LOG_LEVEL=info
 
 ENTRYPOINT ["/usr/local/bin/persys-agent"]
+
+# Default optimized runtime image.
+FROM runtime-base AS runtime
+
+# Optional full runtime image with local daemons/tools for all-in-one test environments.
+FROM runtime-base AS full-runtime
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    qemu-kvm \
+    libvirt-daemon-system \
+    && rm -rf /var/lib/apt/lists/*
+USER persys

@@ -10,11 +10,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/digitalocean/go-libvirt"
 	"github.com/persys/compute-agent/pkg/models"
 	"github.com/sirupsen/logrus"
 )
+
+const managedDiskMarkerSuffix = ".persys-managed"
 
 // VMRuntime manages KVM virtual machine workloads via libvirt
 type VMRuntime struct {
@@ -145,8 +148,22 @@ func (v *VMRuntime) Stop(ctx context.Context, id string) error {
 func (v *VMRuntime) Delete(ctx context.Context, id string) error {
 	domain, err := v.conn.DomainLookupByName(id)
 	if err != nil {
-		// Already deleted
+		// Domain may already be gone, but cleanup deterministic cloud-init artifacts.
+		v.cleanupDeterministicVMArtifacts(id)
 		return nil
+	}
+
+	diskPaths := []string{}
+	domainXML, xmlErr := v.conn.DomainGetXMLDesc(domain, libvirt.DomainXMLFlags(0))
+	if xmlErr != nil {
+		v.logger.Warnf("Failed to fetch domain XML for %s during delete: %v", id, xmlErr)
+	} else {
+		paths, parseErr := parseDiskSourceFilePaths(domainXML)
+		if parseErr != nil {
+			v.logger.Warnf("Failed to parse domain XML for %s during delete: %v", id, parseErr)
+		} else {
+			diskPaths = paths
+		}
 	}
 
 	// Destroy if running
@@ -159,6 +176,9 @@ func (v *VMRuntime) Delete(ctx context.Context, id string) error {
 	if err := v.conn.DomainUndefine(domain); err != nil {
 		return fmt.Errorf("failed to undefine domain: %w", err)
 	}
+
+	v.cleanupDiskArtifacts(id, diskPaths)
+	v.cleanupDeterministicVMArtifacts(id)
 
 	v.logger.Infof("Deleted VM: %s", id)
 	return nil
@@ -331,6 +351,11 @@ func (v *VMRuntime) createDisk(diskCfg *models.DiskConfig) error {
 	}
 
 	v.logger.Infof("Created QCOW2 disk: %s (%dGB)", diskCfg.Path, diskCfg.SizeGB)
+
+	if err := os.WriteFile(managedDiskMarkerPath(diskCfg.Path), []byte(time.Now().Format(time.RFC3339)), 0644); err != nil {
+		v.logger.Warnf("Failed to create managed-disk marker for %s: %v", diskCfg.Path, err)
+	}
+
 	return nil
 }
 
@@ -404,6 +429,85 @@ func (v *VMRuntime) createCloudInitISO(vmID string, spec *models.VMSpec) (string
 
 	v.logger.Infof("Created cloud-init ISO: %s", isoPath)
 	return isoPath, nil
+}
+
+func managedDiskMarkerPath(diskPath string) string {
+	return diskPath + managedDiskMarkerSuffix
+}
+
+func expectedCloudInitISOPaths(vmID string) []string {
+	return []string{
+		filepath.Join("/var/lib/libvirt/images", fmt.Sprintf("%s-cloud-init.iso", vmID)),
+		filepath.Join("/tmp", fmt.Sprintf("%s-cloud-init.iso", vmID)),
+	}
+}
+
+func isCloudInitISOForVM(vmID, path string) bool {
+	return filepath.Base(path) == fmt.Sprintf("%s-cloud-init.iso", vmID)
+}
+
+func parseDiskSourceFilePaths(domainXML string) ([]string, error) {
+	type domainDiskSource struct {
+		File string `xml:"file,attr"`
+	}
+	type domainDisk struct {
+		Type   string           `xml:"type,attr"`
+		Source domainDiskSource `xml:"source"`
+	}
+	type domainDevices struct {
+		Disks []domainDisk `xml:"disk"`
+	}
+	type domainForCleanup struct {
+		Devices domainDevices `xml:"devices"`
+	}
+
+	var parsed domainForCleanup
+	if err := xml.Unmarshal([]byte(domainXML), &parsed); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal domain xml: %w", err)
+	}
+
+	var paths []string
+	for _, disk := range parsed.Devices.Disks {
+		if disk.Type != "file" || disk.Source.File == "" {
+			continue
+		}
+		paths = append(paths, disk.Source.File)
+	}
+	return paths, nil
+}
+
+func (v *VMRuntime) cleanupDeterministicVMArtifacts(vmID string) {
+	for _, path := range expectedCloudInitISOPaths(vmID) {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			v.logger.Warnf("Failed to remove cloud-init ISO %s: %v", path, err)
+		}
+	}
+}
+
+func (v *VMRuntime) cleanupDiskArtifacts(vmID string, diskPaths []string) {
+	for _, diskPath := range diskPaths {
+		remove := false
+		if isCloudInitISOForVM(vmID, diskPath) {
+			remove = true
+		} else {
+			if _, err := os.Stat(managedDiskMarkerPath(diskPath)); err == nil {
+				remove = true
+			}
+		}
+
+		if !remove {
+			continue
+		}
+
+		if err := os.Remove(diskPath); err != nil && !os.IsNotExist(err) {
+			v.logger.Warnf("Failed to remove managed VM disk %s: %v", diskPath, err)
+			continue
+		}
+
+		if err := os.Remove(managedDiskMarkerPath(diskPath)); err != nil && !os.IsNotExist(err) {
+			v.logger.Warnf("Failed to remove managed-disk marker for %s: %v", diskPath, err)
+		}
+	}
 }
 
 // Helper functions

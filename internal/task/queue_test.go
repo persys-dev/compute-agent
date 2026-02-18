@@ -32,3 +32,23 @@ func TestQueue_SubmitAndCompleteTask(t *testing.T) {
 		t.Fatalf("expected completed task, got %s", result.Status)
 	}
 }
+
+func TestQueue_Submit_FullQueueDoesNotLeaveGhostTask(t *testing.T) {
+	q := NewQueue(1, logrus.New())
+
+	if err := q.Submit(&Task{ID: "t1", Type: TaskTypeApplyWorkload}); err != nil {
+		t.Fatalf("submit t1 failed: %v", err)
+	}
+	if err := q.Submit(&Task{ID: "t2", Type: TaskTypeApplyWorkload}); err != nil {
+		t.Fatalf("submit t2 failed: %v", err)
+	}
+
+	err := q.Submit(&Task{ID: "t3", Type: TaskTypeApplyWorkload})
+	if err == nil {
+		t.Fatal("expected submit to fail when queue is full")
+	}
+
+	if got := q.GetTask("t3"); got != nil {
+		t.Fatal("expected failed submission task to be removed from task map")
+	}
+}
