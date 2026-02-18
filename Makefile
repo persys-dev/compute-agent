@@ -7,6 +7,7 @@ BUILD_DIR=bin
 DOCKER_IMAGE=persys/compute-agent
 PROTO_DIR=api/proto
 PKG_DIR=pkg/api/v1
+CONTROL_PKG_DIR=pkg/control/v1
 
 # Go parameters
 GOCMD=go
@@ -27,9 +28,13 @@ deps:
 proto:
 	@echo "==> Generating protobuf code..."
 	@mkdir -p $(PKG_DIR)
+	@mkdir -p $(CONTROL_PKG_DIR)
 	cd api/proto && protoc --go_out=../../$(PKG_DIR) --go_opt=paths=source_relative \
 		--go-grpc_out=../../$(PKG_DIR) --go-grpc_opt=paths=source_relative \
 		agent.proto
+	cd api/proto && protoc --go_out=../../$(CONTROL_PKG_DIR) --go_opt=paths=source_relative \
+		--go-grpc_out=../../$(CONTROL_PKG_DIR) --go-grpc_opt=paths=source_relative \
+		control.proto
 
 build:
 	@echo "==> Building $(BINARY_NAME)..."
@@ -54,6 +59,7 @@ clean:
 	$(GOCLEAN)
 	rm -rf $(BUILD_DIR)
 	rm -rf $(PKG_DIR)
+	rm -rf $(CONTROL_PKG_DIR)
 
 test:
 	@echo "==> Running all tests..."
