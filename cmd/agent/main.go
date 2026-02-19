@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/persys/compute-agent/internal/certmanager"
 	"github.com/persys/compute-agent/internal/config"
 	"github.com/persys/compute-agent/internal/control"
 	"github.com/persys/compute-agent/internal/garbage"
@@ -51,6 +52,17 @@ func main() {
 
 	logger.Infof("Starting Persys Compute Agent v%s", version)
 	logger.Infof("Node ID: %s", cfg.NodeID)
+
+	// Initialize certificate manager before starting TLS endpoints.
+	var certManagerCancel context.CancelFunc
+	if cfg.TLSEnabled {
+		certMgr := certmanager.New(cfg, logger)
+		certCtx, cancel := context.WithCancel(context.Background())
+		certManagerCancel = cancel
+		if err := certMgr.Start(certCtx); err != nil {
+			logger.Fatalf("Failed to initialize certificate manager: %v", err)
+		}
+	}
 
 	// Initialize state store
 	logger.Info("Initializing state store...")
@@ -240,6 +252,9 @@ func main() {
 
 	if cancelControl != nil {
 		cancelControl()
+	}
+	if certManagerCancel != nil {
+		certManagerCancel()
 	}
 
 	grpcServer.Stop()

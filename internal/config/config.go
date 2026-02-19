@@ -22,6 +22,20 @@ type Config struct {
 	TLSKeyPath  string
 	TLSCAPath   string
 
+	// Vault certificate manager configuration
+	VaultEnabled       bool
+	VaultAddr          string
+	VaultAuthMethod    string
+	VaultToken         string
+	VaultAppRoleID     string
+	VaultAppSecretID   string
+	VaultPKIMount      string
+	VaultPKIRole       string
+	VaultCertTTL       time.Duration
+	VaultServiceName   string
+	VaultServiceDomain string
+	VaultRetryInterval time.Duration
+
 	// State store configuration
 	StateStorePath string
 
@@ -62,10 +76,22 @@ func Load() (*Config, error) {
 		GRPCPort: getEnvAsInt("PERSYS_GRPC_PORT", 50051),
 
 		// TLS defaults
-		TLSEnabled:  getEnvAsBool("PERSYS_TLS_ENABLED", true),
-		TLSCertPath: getEnv("PERSYS_TLS_CERT", "/etc/persys/certs/agent/compute-agent.pem"),
-		TLSKeyPath:  getEnv("PERSYS_TLS_KEY", "/etc/persys/certs/agent/compute-agent-key.pem"),
-		TLSCAPath:   getEnv("PERSYS_TLS_CA", "/etc/persys/certs/agent/ca.pem"),
+		TLSEnabled:         getEnvAsBool("PERSYS_TLS_ENABLED", true),
+		TLSCertPath:        getEnv("PERSYS_TLS_CERT", "/etc/persys/certs/agent/compute-agent.pem"),
+		TLSKeyPath:         getEnv("PERSYS_TLS_KEY", "/etc/persys/certs/agent/compute-agent-key.pem"),
+		TLSCAPath:          getEnv("PERSYS_TLS_CA", "/etc/persys/certs/agent/ca.pem"),
+		VaultEnabled:       getEnvAsBool("PERSYS_VAULT_ENABLED", true),
+		VaultAddr:          getEnv("PERSYS_VAULT_ADDR", "http://localhost:8200"),
+		VaultAuthMethod:    strings.ToLower(getEnv("PERSYS_VAULT_AUTH_METHOD", "token")),
+		VaultToken:         getEnv("PERSYS_VAULT_TOKEN", ""),
+		VaultAppRoleID:     getEnv("PERSYS_VAULT_APPROLE_ROLE_ID", ""),
+		VaultAppSecretID:   getEnv("PERSYS_VAULT_APPROLE_SECRET_ID", ""),
+		VaultPKIMount:      getEnv("PERSYS_VAULT_PKI_MOUNT", "pki"),
+		VaultPKIRole:       getEnv("PERSYS_VAULT_PKI_ROLE", "compute-agent"),
+		VaultCertTTL:       getEnvAsDuration("PERSYS_VAULT_CERT_TTL", 24*time.Hour),
+		VaultServiceName:   getEnv("PERSYS_VAULT_SERVICE_NAME", "compute-agent"),
+		VaultServiceDomain: getEnv("PERSYS_VAULT_SERVICE_DOMAIN", ""),
+		VaultRetryInterval: getEnvAsDuration("PERSYS_VAULT_RETRY_INTERVAL", 2*time.Minute),
 
 		// State store defaults
 		StateStorePath: getEnv("PERSYS_STATE_PATH", "/var/lib/persys/state.db"),
@@ -120,6 +146,36 @@ func (c *Config) Validate() error {
 	if c.TLSEnabled {
 		if c.TLSCertPath == "" || c.TLSKeyPath == "" || c.TLSCAPath == "" {
 			return fmt.Errorf("TLS enabled but certificate paths not configured")
+		}
+	}
+
+	if c.VaultEnabled {
+		if !c.TLSEnabled {
+			return fmt.Errorf("vault cert manager requires TLS to be enabled")
+		}
+		if c.VaultAddr == "" {
+			return fmt.Errorf("vault is enabled but PERSYS_VAULT_ADDR is empty")
+		}
+		if c.VaultPKIMount == "" || c.VaultPKIRole == "" {
+			return fmt.Errorf("vault is enabled but PKI mount/role is not configured")
+		}
+		switch c.VaultAuthMethod {
+		case "token":
+			if c.VaultToken == "" {
+				return fmt.Errorf("vault token auth selected but PERSYS_VAULT_TOKEN is empty")
+			}
+		case "approle":
+			if c.VaultAppRoleID == "" || c.VaultAppSecretID == "" {
+				return fmt.Errorf("vault approle auth selected but role_id/secret_id is missing")
+			}
+		default:
+			return fmt.Errorf("unsupported vault auth method %q (expected token|approle)", c.VaultAuthMethod)
+		}
+		if c.VaultCertTTL <= 0 {
+			return fmt.Errorf("vault cert TTL must be positive")
+		}
+		if c.VaultRetryInterval <= 0 {
+			return fmt.Errorf("vault retry interval must be positive")
 		}
 	}
 

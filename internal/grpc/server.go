@@ -10,6 +10,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/persys/compute-agent/internal/config"
@@ -106,31 +107,89 @@ func (s *Server) Stop() {
 
 // loadTLSConfig loads TLS certificates for mTLS
 func (s *Server) loadTLSConfig() (*tls.Config, error) {
-	// Load server certificate and key
-	cert, err := tls.LoadX509KeyPair(s.config.TLSCertPath, s.config.TLSKeyPath)
+	provider := &dynamicTLSProvider{
+		certPath: s.config.TLSCertPath,
+		keyPath:  s.config.TLSKeyPath,
+		caPath:   s.config.TLSCAPath,
+	}
+	// Prime initial load so startup fails fast on invalid/missing files.
+	if _, err := provider.getConfig(); err != nil {
+		return nil, err
+	}
+
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+			return provider.getConfig()
+		},
+	}, nil
+}
+
+type dynamicTLSProvider struct {
+	certPath string
+	keyPath  string
+	caPath   string
+
+	mu          sync.RWMutex
+	cached      *tls.Config
+	certModTime time.Time
+	keyModTime  time.Time
+	caModTime   time.Time
+}
+
+func (d *dynamicTLSProvider) getConfig() (*tls.Config, error) {
+	certInfo, err := os.Stat(d.certPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat server certificate: %w", err)
+	}
+	keyInfo, err := os.Stat(d.keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat server key: %w", err)
+	}
+	caInfo, err := os.Stat(d.caPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat CA certificate: %w", err)
+	}
+
+	d.mu.RLock()
+	cached := d.cached
+	certUnchanged := d.certModTime.Equal(certInfo.ModTime())
+	keyUnchanged := d.keyModTime.Equal(keyInfo.ModTime())
+	caUnchanged := d.caModTime.Equal(caInfo.ModTime())
+	d.mu.RUnlock()
+
+	if cached != nil && certUnchanged && keyUnchanged && caUnchanged {
+		return cached, nil
+	}
+
+	keyPair, err := tls.LoadX509KeyPair(d.certPath, d.keyPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load server certificate: %w", err)
 	}
-
-	// Load CA certificate for client verification
-	caCert, err := os.ReadFile(s.config.TLSCAPath)
+	caCert, err := os.ReadFile(d.caPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read CA certificate: %w", err)
 	}
-
 	caCertPool := x509.NewCertPool()
 	if !caCertPool.AppendCertsFromPEM(caCert) {
 		return nil, fmt.Errorf("failed to parse CA certificate")
 	}
 
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{cert},
+	updated := &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{keyPair},
 		ClientCAs:    caCertPool,
 		ClientAuth:   tls.RequireAndVerifyClientCert,
-		MinVersion:   tls.VersionTLS12,
 	}
 
-	return tlsConfig, nil
+	d.mu.Lock()
+	d.cached = updated
+	d.certModTime = certInfo.ModTime()
+	d.keyModTime = keyInfo.ModTime()
+	d.caModTime = caInfo.ModTime()
+	d.mu.Unlock()
+
+	return updated, nil
 }
 
 // ApplyWorkload handles workload create/update requests
