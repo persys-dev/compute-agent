@@ -42,7 +42,7 @@ func DefaultThresholds() *Thresholds {
 	return &Thresholds{
 		MemoryThreshold: 80.0,
 		CPUThreshold:    80.0,
-		DiskThreshold:   80.0,
+		DiskThreshold:   90.0,
 	}
 }
 
