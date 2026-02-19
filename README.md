@@ -101,9 +101,30 @@ The agent is configured via environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PERSYS_TLS_ENABLED` | `true` | Enable mTLS authentication |
-| `PERSYS_TLS_CERT` | `/etc/persys/certs/agent.crt` | Server certificate path |
-| `PERSYS_TLS_KEY` | `/etc/persys/certs/agent.key` | Server private key path |
-| `PERSYS_TLS_CA` | `/etc/persys/certs/ca.crt` | CA certificate path |
+| `PERSYS_TLS_CERT` | `/etc/persys/certs/agent/compute-agent.pem` | Server certificate path |
+| `PERSYS_TLS_KEY` | `/etc/persys/certs/agent/compute-agent-key.pem` | Server private key path |
+| `PERSYS_TLS_CA` | `/etc/persys/certs/agent/ca.pem` | CA certificate path |
+
+### Vault Certificate Manager Configuration
+
+When enabled, the agent retrieves and rotates certificates from Vault.
+Rotation occurs at 80% of certificate lifetime, and if Vault is unavailable
+the agent falls back to manual certificates on disk.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PERSYS_VAULT_ENABLED` | `false` | Enable Vault-backed certificate manager |
+| `PERSYS_VAULT_ADDR` | `http://127.0.0.1:8200` | Vault API address |
+| `PERSYS_VAULT_AUTH_METHOD` | `token` | Auth mode: `token` or `approle` |
+| `PERSYS_VAULT_TOKEN` | `` | Vault token for `token` auth |
+| `PERSYS_VAULT_APPROLE_ROLE_ID` | `` | AppRole role_id for `approle` auth |
+| `PERSYS_VAULT_APPROLE_SECRET_ID` | `` | AppRole secret_id for `approle` auth |
+| `PERSYS_VAULT_PKI_MOUNT` | `pki` | Vault PKI mount path |
+| `PERSYS_VAULT_PKI_ROLE` | `compute-agent` | Vault PKI role name |
+| `PERSYS_VAULT_CERT_TTL` | `24h` | Requested certificate TTL |
+| `PERSYS_VAULT_RETRY_INTERVAL` | `1m` | Retry interval when Vault is unavailable |
+| `PERSYS_VAULT_SERVICE_NAME` | `compute-agent` | Primary service name added to DNS SANs |
+| `PERSYS_VAULT_SERVICE_DOMAIN` | `` | Optional domain appended to service/host SANs |
 
 ### State Store Configuration
 
