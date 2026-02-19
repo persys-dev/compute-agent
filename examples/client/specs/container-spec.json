@@ -36,8 +36,7 @@
   },
   "labels": {
     "app": "demo-nginx",
-    "environment": "staging",
-    "managed-by": "persys-test-client"
+    "environment": "staging"
   }
 }
 
