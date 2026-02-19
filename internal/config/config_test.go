@@ -33,6 +33,7 @@ func TestLoad_NodeLabelsFromEnv(t *testing.T) {
 	t.Setenv("PERSYS_COMPOSE_ENABLED", "false")
 	t.Setenv("PERSYS_VM_ENABLED", "false")
 	t.Setenv("PERSYS_TLS_ENABLED", "false")
+	t.Setenv("PERSYS_VAULT_ENABLED", "false")
 	t.Setenv("PERSYS_NODE_REGION", "us-east-1")
 	t.Setenv("PERSYS_NODE_ENV", "prod")
 	t.Setenv("PERSYS_NODE_LABELS", "team=platform,zone=use1-az2,invalid,noequal=,=novalue")
@@ -78,6 +79,7 @@ func TestLoad_SchedulerAddrFromEnv(t *testing.T) {
 	t.Setenv("PERSYS_COMPOSE_ENABLED", "false")
 	t.Setenv("PERSYS_VM_ENABLED", "false")
 	t.Setenv("PERSYS_TLS_ENABLED", "false")
+	t.Setenv("PERSYS_VAULT_ENABLED", "false")
 	t.Setenv("PERSYS_SCHEDULER_ADDR", "10.0.0.9:8085")
 	t.Setenv("PERSYS_SCHEDULER_INSECURE", "true")
 
