@@ -25,6 +25,8 @@ type Manager struct {
 	logger          *logrus.Entry
 	metrics         *metrics.Metrics
 	resourceMonitor *resources.Monitor
+	workloadOpMu    sync.Mutex
+	workloadOpLocks map[string]*sync.Mutex
 
 	retryPolicy   *retry.RetryPolicy
 	retryTrackers map[string]*retry.RetryTracker
@@ -34,11 +36,12 @@ type Manager struct {
 // NewManager creates a new workload manager
 func NewManager(store state.Store, runtimeMgr *runtime.Manager, logger *logrus.Logger) *Manager {
 	return &Manager{
-		store:         store,
-		runtimeMgr:    runtimeMgr,
-		logger:        logger.WithField("component", "workload-manager"),
-		retryPolicy:   retry.DefaultRetryPolicy(),
-		retryTrackers: make(map[string]*retry.RetryTracker),
+		store:           store,
+		runtimeMgr:      runtimeMgr,
+		logger:          logger.WithField("component", "workload-manager"),
+		workloadOpLocks: make(map[string]*sync.Mutex),
+		retryPolicy:     retry.DefaultRetryPolicy(),
+		retryTrackers:   make(map[string]*retry.RetryTracker),
 	}
 }
 
@@ -77,6 +80,19 @@ func (m *Manager) resetRetryTracker(workloadID string) {
 	m.retryMu.Lock()
 	delete(m.retryTrackers, workloadID)
 	m.retryMu.Unlock()
+}
+
+func (m *Manager) lockWorkloadOp(workloadID string) func() {
+	m.workloadOpMu.Lock()
+	opLock, ok := m.workloadOpLocks[workloadID]
+	if !ok {
+		opLock = &sync.Mutex{}
+		m.workloadOpLocks[workloadID] = opLock
+	}
+	m.workloadOpMu.Unlock()
+
+	opLock.Lock()
+	return opLock.Unlock
 }
 
 func ensureMetadata(status *models.WorkloadStatus) {
@@ -145,16 +161,34 @@ func (m *Manager) enrichStatusWithRuntimeMetadata(ctx context.Context, rt runtim
 
 // ApplyWorkload applies a workload with revision-based idempotency
 func (m *Manager) ApplyWorkload(ctx context.Context, workload *models.Workload) (*models.WorkloadStatus, bool, error) {
+	unlock := m.lockWorkloadOp(workload.ID)
+	defer unlock()
+
 	m.logger.Infof("Applying workload: %s (type: %s, revision: %s)", workload.ID, workload.Type, workload.RevisionID)
 
 	// Check if workload already exists with same revision (idempotency)
 	existing, err := m.store.GetWorkload(workload.ID)
 	if err == nil && existing.RevisionID == workload.RevisionID {
-		m.logger.Infof("Workload %s already at revision %s, skipping", workload.ID, workload.RevisionID)
-
-		// Return current status
 		status, err := m.store.GetStatus(workload.ID)
-		if err != nil {
+		if err == nil && status != nil {
+			missingFromRuntime := status.ActualState == models.ActualStateUnknown && isRuntimeMissing(status.Message)
+			if status.ActualState != models.ActualStateFailed && !missingFromRuntime {
+				m.logger.Infof("Workload %s already at revision %s, skipping", workload.ID, workload.RevisionID)
+				return status, true, nil // skipped=true
+			}
+
+			m.logger.Infof(
+				"Workload %s at revision %s has non-healthy state (%s), retrying apply",
+				workload.ID,
+				workload.RevisionID,
+				status.ActualState,
+			)
+		} else {
+			m.logger.Warnf(
+				"Workload %s revision matches but status unavailable, preserving idempotent skip: %v",
+				workload.ID,
+				err,
+			)
 			status = &models.WorkloadStatus{
 				ID:           workload.ID,
 				Type:         workload.Type,
@@ -163,8 +197,8 @@ func (m *Manager) ApplyWorkload(ctx context.Context, workload *models.Workload) 
 				ActualState:  models.ActualStateUnknown,
 				Message:      "status not found",
 			}
+			return status, true, nil // skipped=true
 		}
-		return status, true, nil // skipped=true
 	}
 
 	// Get runtime for this workload type
@@ -335,6 +369,9 @@ func (m *Manager) ApplyWorkload(ctx context.Context, workload *models.Workload) 
 
 // DeleteWorkload removes a workload
 func (m *Manager) DeleteWorkload(ctx context.Context, id string) error {
+	unlock := m.lockWorkloadOp(id)
+	defer unlock()
+
 	m.logger.Infof("Deleting workload: %s", id)
 
 	startTime := time.Now()
@@ -421,6 +458,9 @@ func (m *Manager) ListWorkloads(ctx context.Context, workloadType *models.Worklo
 
 // ReconcileWorkload ensures workload state matches desired state
 func (m *Manager) ReconcileWorkload(ctx context.Context, id string) error {
+	unlock := m.lockWorkloadOp(id)
+	defer unlock()
+
 	workload, err := m.store.GetWorkload(id)
 	if err != nil {
 		return fmt.Errorf("workload not found: %w", err)
@@ -507,6 +547,28 @@ func (m *Manager) ReconcileWorkload(ctx context.Context, id string) error {
 
 		// Retry failed workloads when policy allows
 		m.logger.Infof("Reconciling %s: status=failed, attempting retry recreate...", id)
+		if m.resourceMonitor != nil {
+			available, issues, checkErr := m.resourceMonitor.IsResourceAvailable()
+			if checkErr != nil {
+				status.ActualState = models.ActualStateFailed
+				status.Message = fmt.Sprintf("recreate admission check failed: %v", checkErr)
+				status.UpdatedAt = time.Now()
+				ensureMetadata(status)
+				status.Metadata["last_error"] = status.Message
+				return m.store.SaveStatus(status)
+			}
+			if !available {
+				status.ActualState = models.ActualStateFailed
+				status.Message = fmt.Sprintf("recreate deferred due to resource constraints: %v", issues)
+				status.UpdatedAt = time.Now()
+				ensureMetadata(status)
+				status.Metadata["failure_reason"] = string(retry.FailureReasonResourceQuotaExceeded)
+				status.Metadata["last_error"] = status.Message
+				status.Metadata["resource_issues"] = strings.Join(issues, "; ")
+				m.logger.Infof("Reconciling %s: retry blocked by resource constraints: %v", id, issues)
+				return m.store.SaveStatus(status)
+			}
+		}
 
 		// Delete the failed workload first
 		if err := rt.Delete(ctx, id); err != nil {

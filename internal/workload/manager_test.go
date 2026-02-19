@@ -3,6 +3,9 @@ package workload
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +18,148 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
+
+type serialStore struct {
+	mu        sync.Mutex
+	workloads map[string]*models.Workload
+	statuses  map[string]*models.WorkloadStatus
+}
+
+func newSerialStore() *serialStore {
+	return &serialStore{
+		workloads: make(map[string]*models.Workload),
+		statuses:  make(map[string]*models.WorkloadStatus),
+	}
+}
+
+func cloneWorkload(w *models.Workload) *models.Workload {
+	if w == nil {
+		return nil
+	}
+	cp := *w
+	if w.Spec != nil {
+		cp.Spec = make(map[string]interface{}, len(w.Spec))
+		for k, v := range w.Spec {
+			cp.Spec[k] = v
+		}
+	}
+	return &cp
+}
+
+func cloneStatus(s *models.WorkloadStatus) *models.WorkloadStatus {
+	if s == nil {
+		return nil
+	}
+	cp := *s
+	if s.Metadata != nil {
+		cp.Metadata = make(map[string]string, len(s.Metadata))
+		for k, v := range s.Metadata {
+			cp.Metadata[k] = v
+		}
+	}
+	return &cp
+}
+
+func (s *serialStore) SaveWorkload(workload *models.Workload) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.workloads[workload.ID] = cloneWorkload(workload)
+	return nil
+}
+
+func (s *serialStore) GetWorkload(id string) (*models.Workload, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w, ok := s.workloads[id]
+	if !ok {
+		return nil, fmt.Errorf("workload not found")
+	}
+	return cloneWorkload(w), nil
+}
+
+func (s *serialStore) DeleteWorkload(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.workloads, id)
+	delete(s.statuses, id)
+	return nil
+}
+
+func (s *serialStore) ListWorkloads() ([]*models.Workload, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*models.Workload, 0, len(s.workloads))
+	for _, w := range s.workloads {
+		out = append(out, cloneWorkload(w))
+	}
+	return out, nil
+}
+
+func (s *serialStore) SaveStatus(status *models.WorkloadStatus) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.statuses[status.ID] = cloneStatus(status)
+	return nil
+}
+
+func (s *serialStore) GetStatus(id string) (*models.WorkloadStatus, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, ok := s.statuses[id]
+	if !ok {
+		return nil, fmt.Errorf("status not found")
+	}
+	return cloneStatus(st), nil
+}
+
+func (s *serialStore) ListStatuses() ([]*models.WorkloadStatus, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*models.WorkloadStatus, 0, len(s.statuses))
+	for _, st := range s.statuses {
+		out = append(out, cloneStatus(st))
+	}
+	return out, nil
+}
+
+func (s *serialStore) Close() error { return nil }
+
+type conflictRuntime struct {
+	createCalls int32
+	exists      int32
+}
+
+func (r *conflictRuntime) Create(ctx context.Context, workload *models.Workload) error {
+	atomic.AddInt32(&r.createCalls, 1)
+	time.Sleep(25 * time.Millisecond)
+	if !atomic.CompareAndSwapInt32(&r.exists, 0, 1) {
+		return fmt.Errorf("container name conflict")
+	}
+	return nil
+}
+
+func (r *conflictRuntime) Start(ctx context.Context, id string) error { return nil }
+func (r *conflictRuntime) Stop(ctx context.Context, id string) error  { return nil }
+func (r *conflictRuntime) Delete(ctx context.Context, id string) error {
+	atomic.StoreInt32(&r.exists, 0)
+	return nil
+}
+func (r *conflictRuntime) Status(ctx context.Context, id string) (models.ActualState, string, error) {
+	if atomic.LoadInt32(&r.exists) == 1 {
+		return models.ActualStateRunning, "running", nil
+	}
+	return models.ActualStateUnknown, "container not found", nil
+}
+func (r *conflictRuntime) List(ctx context.Context) ([]string, error) {
+	if atomic.LoadInt32(&r.exists) == 1 {
+		return []string{"demo-c1"}, nil
+	}
+	return []string{}, nil
+}
+func (r *conflictRuntime) Type() models.WorkloadType { return models.WorkloadTypeContainer }
+func (r *conflictRuntime) Healthy(ctx context.Context) error {
+	return nil
+}
 
 // MockStore implements the state.Store interface for testing
 type MockStore struct {
@@ -229,6 +374,61 @@ func TestApplyWorkload_SameRevision_Skipped(t *testing.T) {
 	mockRuntime.AssertNotCalled(t, "Start", mock.Anything, mock.Anything)
 
 	mockStore.AssertExpectations(t)
+}
+
+func TestApplyWorkload_SameRevisionFailedStatus_NotSkipped(t *testing.T) {
+	mockStore := new(MockStore)
+	mockRuntime := new(MockRuntime)
+
+	runtimeMgr := runtime.NewManager()
+	mockRuntime.On("Type").Return(models.WorkloadTypeContainer)
+	runtimeMgr.Register(mockRuntime)
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.FatalLevel)
+	manager := NewManager(mockStore, runtimeMgr, logger)
+
+	workload := &models.Workload{
+		ID:           "test-workload",
+		Type:         models.WorkloadTypeContainer,
+		RevisionID:   "rev-1",
+		DesiredState: models.DesiredStateRunning,
+		Spec:         map[string]interface{}{"image": "nginx:latest"},
+	}
+
+	existingStatus := &models.WorkloadStatus{
+		ID:           "test-workload",
+		Type:         models.WorkloadTypeContainer,
+		RevisionID:   "rev-1",
+		DesiredState: models.DesiredStateRunning,
+		ActualState:  models.ActualStateFailed,
+		Message:      "admission rejected due to resource constraints",
+	}
+
+	mockStore.On("GetWorkload", "test-workload").Return(workload, nil)
+	mockStore.On("GetStatus", "test-workload").Return(existingStatus, nil).Once()
+	mockStore.On("SaveWorkload", mock.AnythingOfType("*models.Workload")).Return(nil).Once()
+	mockStore.On("SaveStatus", mock.MatchedBy(func(s *models.WorkloadStatus) bool {
+		return s.ID == "test-workload" && s.ActualState == models.ActualStatePending
+	})).Return(nil).Once()
+	mockRuntime.On("Create", mock.Anything, workload).Return(nil).Once()
+	mockRuntime.On("Start", mock.Anything, "test-workload").Return(nil).Once()
+	mockRuntime.On("Status", mock.Anything, "test-workload").Return(
+		models.ActualStateRunning, "running", nil,
+	).Once()
+	mockStore.On("SaveStatus", mock.MatchedBy(func(s *models.WorkloadStatus) bool {
+		return s.ID == "test-workload" && s.ActualState == models.ActualStateRunning
+	})).Return(nil).Once()
+
+	status, skipped, err := manager.ApplyWorkload(context.Background(), workload)
+	assert.NoError(t, err)
+	assert.False(t, skipped)
+	assert.NotNil(t, status)
+	assert.Equal(t, models.ActualStateRunning, status.ActualState)
+
+	mockRuntime.AssertCalled(t, "Create", mock.Anything, workload)
+	mockStore.AssertExpectations(t)
+	mockRuntime.AssertExpectations(t)
 }
 
 func TestApplyWorkload_DifferentRevision_Recreated(t *testing.T) {
@@ -658,6 +858,60 @@ func TestReconcileWorkload_RecreatesMissingRuntimeWorkload(t *testing.T) {
 	mockRuntime.AssertExpectations(t)
 }
 
+func TestReconcileWorkload_MissingRuntime_ResourceUnavailable_DoesNotRecreate(t *testing.T) {
+	mockStore := new(MockStore)
+	mockRuntime := new(MockRuntime)
+
+	runtimeMgr := runtime.NewManager()
+	mockRuntime.On("Type").Return(models.WorkloadTypeContainer)
+	runtimeMgr.Register(mockRuntime)
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.FatalLevel)
+
+	manager := NewManager(mockStore, runtimeMgr, logger)
+	manager.SetResourceMonitor(resources.NewMonitor(&resources.Thresholds{
+		MemoryThreshold: -1,
+		CPUThreshold:    -1,
+		DiskThreshold:   -1,
+	}, logger))
+
+	workload := &models.Workload{
+		ID:           "missing-workload",
+		Type:         models.WorkloadTypeContainer,
+		DesiredState: models.DesiredStateRunning,
+	}
+
+	status := &models.WorkloadStatus{
+		ID:           "missing-workload",
+		Type:         models.WorkloadTypeContainer,
+		DesiredState: models.DesiredStateRunning,
+		ActualState:  models.ActualStateUnknown,
+		Message:      "container not found",
+	}
+
+	mockStore.On("GetWorkload", "missing-workload").Return(workload, nil)
+	mockStore.On("GetStatus", "missing-workload").Return(status, nil)
+	mockRuntime.On("Status", mock.Anything, "missing-workload").Return(
+		models.ActualStateUnknown, "container not found", nil,
+	).Once()
+	mockStore.On("SaveStatus", mock.MatchedBy(func(s *models.WorkloadStatus) bool {
+		return s.ID == "missing-workload" &&
+			s.ActualState == models.ActualStateFailed &&
+			s.Metadata != nil &&
+			s.Metadata["failure_reason"] == string(retry.FailureReasonResourceQuotaExceeded)
+	})).Return(nil).Once()
+
+	err := manager.ReconcileWorkload(context.Background(), "missing-workload")
+	assert.NoError(t, err)
+
+	mockRuntime.AssertNotCalled(t, "Delete", mock.Anything, "missing-workload")
+	mockRuntime.AssertNotCalled(t, "Create", mock.Anything, mock.Anything)
+	mockRuntime.AssertNotCalled(t, "Start", mock.Anything, "missing-workload")
+	mockStore.AssertExpectations(t)
+	mockRuntime.AssertExpectations(t)
+}
+
 func TestGetStatus_SurfacesRuntimeMetadata(t *testing.T) {
 	mockStore := new(MockStore)
 	baseRuntime := new(MockRuntime)
@@ -694,4 +948,72 @@ func TestGetStatus_SurfacesRuntimeMetadata(t *testing.T) {
 
 	mockStore.AssertExpectations(t)
 	baseRuntime.AssertExpectations(t)
+}
+
+func TestApplyWorkload_ConcurrentSameRevision_OneAppliesOneSkips(t *testing.T) {
+	store := newSerialStore()
+	rt := &conflictRuntime{}
+	runtimeMgr := runtime.NewManager()
+	runtimeMgr.Register(rt)
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.FatalLevel)
+	manager := NewManager(store, runtimeMgr, logger)
+
+	workload := &models.Workload{
+		ID:           "demo-c1",
+		Type:         models.WorkloadTypeContainer,
+		RevisionID:   "rev-1",
+		DesiredState: models.DesiredStateRunning,
+		Spec:         map[string]interface{}{"image": "nginx:latest"},
+	}
+
+	// Simulate previously failed/missing runtime status, which should trigger re-apply path.
+	store.workloads[workload.ID] = cloneWorkload(workload)
+	store.statuses[workload.ID] = &models.WorkloadStatus{
+		ID:           workload.ID,
+		Type:         workload.Type,
+		RevisionID:   workload.RevisionID,
+		DesiredState: workload.DesiredState,
+		ActualState:  models.ActualStateUnknown,
+		Message:      "container not found",
+	}
+
+	type result struct {
+		skipped bool
+		err     error
+	}
+
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	run := func() {
+		defer wg.Done()
+		<-start
+		_, skipped, err := manager.ApplyWorkload(context.Background(), workload)
+		results <- result{skipped: skipped, err: err}
+	}
+
+	go run()
+	go run()
+	close(start)
+	wg.Wait()
+	close(results)
+
+	successCount := 0
+	skippedCount := 0
+	for r := range results {
+		assert.NoError(t, r.err)
+		if r.skipped {
+			skippedCount++
+		} else {
+			successCount++
+		}
+	}
+
+	assert.Equal(t, 1, successCount)
+	assert.Equal(t, 1, skippedCount)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&rt.createCalls))
 }
