@@ -220,13 +220,7 @@ func (m *Manager) issueAndPersist(ctx context.Context, client *vault.Client) err
 		return err
 	}
 
-	if err := writeAtomic(m.cfg.TLSCertPath, certPEM, 0o644); err != nil {
-		return err
-	}
-	if err := writeAtomic(m.cfg.TLSKeyPath, keyPEM, 0o600); err != nil {
-		return err
-	}
-	if err := writeAtomic(m.cfg.TLSCAPath, combinedCA, 0o644); err != nil {
+	if err := writeCertBundleAtomic(m.cfg.TLSCertPath, certPEM, m.cfg.TLSKeyPath, keyPEM, m.cfg.TLSCAPath, combinedCA); err != nil {
 		return err
 	}
 
@@ -464,4 +458,26 @@ func writeAtomic(path, contents string, mode os.FileMode) error {
 	}
 
 	return os.Rename(tmpName, path)
+}
+
+func writeCertBundleAtomic(certPath, certPEM, keyPath, keyPEM, caPath, caPEM string) error {
+	// Validate material before changing anything on disk.
+	if _, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM)); err != nil {
+		return fmt.Errorf("invalid cert/key pair: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM([]byte(caPEM)) {
+		return errors.New("invalid CA PEM")
+	}
+
+	if err := writeAtomic(keyPath, keyPEM, 0o600); err != nil {
+		return err
+	}
+	if err := writeAtomic(certPath, certPEM, 0o644); err != nil {
+		return err
+	}
+	if err := writeAtomic(caPath, caPEM, 0o644); err != nil {
+		return err
+	}
+	return nil
 }

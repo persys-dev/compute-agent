@@ -164,14 +164,23 @@ func (d *dynamicTLSProvider) getConfig() (*tls.Config, error) {
 
 	keyPair, err := tls.LoadX509KeyPair(d.certPath, d.keyPath)
 	if err != nil {
+		if cached != nil {
+			return cached, nil
+		}
 		return nil, fmt.Errorf("failed to load server certificate: %w", err)
 	}
 	caCert, err := os.ReadFile(d.caPath)
 	if err != nil {
+		if cached != nil {
+			return cached, nil
+		}
 		return nil, fmt.Errorf("failed to read CA certificate: %w", err)
 	}
 	caCertPool := x509.NewCertPool()
 	if !caCertPool.AppendCertsFromPEM(caCert) {
+		if cached != nil {
+			return cached, nil
+		}
 		return nil, fmt.Errorf("failed to parse CA certificate")
 	}
 
