@@ -63,9 +63,9 @@ func Load() (*Config, error) {
 
 		// TLS defaults
 		TLSEnabled:  getEnvAsBool("PERSYS_TLS_ENABLED", true),
-		TLSCertPath: getEnv("PERSYS_TLS_CERT", "/etc/persys/certs/agent/agent.crt"),
-		TLSKeyPath:  getEnv("PERSYS_TLS_KEY", "/etc/persys/certs/agent/agent.key"),
-		TLSCAPath:   getEnv("PERSYS_TLS_CA", "/etc/persys/certs/agent/ca.crt"),
+		TLSCertPath: getEnv("PERSYS_TLS_CERT", "/etc/persys/certs/agent/compute-agent.pem"),
+		TLSKeyPath:  getEnv("PERSYS_TLS_KEY", "/etc/persys/certs/agent/compute-agent-key.pem"),
+		TLSCAPath:   getEnv("PERSYS_TLS_CA", "/etc/persys/certs/agent/ca.pem"),
 
 		// State store defaults
 		StateStorePath: getEnv("PERSYS_STATE_PATH", "/var/lib/persys/state.db"),
