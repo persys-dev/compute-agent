@@ -3,6 +3,7 @@ package reconcile
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/persys/compute-agent/internal/state"
@@ -17,6 +18,7 @@ type Loop struct {
 	interval time.Duration
 	stopCh   chan struct{}
 	logger   *logrus.Entry
+	stopOnce sync.Once
 }
 
 // NewLoop creates a new reconciliation loop
@@ -56,7 +58,9 @@ func (l *Loop) Start(ctx context.Context) {
 
 // Stop stops the reconciliation loop
 func (l *Loop) Stop() {
-	close(l.stopCh)
+	l.stopOnce.Do(func() {
+		close(l.stopCh)
+	})
 }
 
 // reconcileAll reconciles all workloads
