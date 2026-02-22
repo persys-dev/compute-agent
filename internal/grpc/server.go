@@ -316,12 +316,75 @@ func (s *Server) GetWorkloadStatus(ctx context.Context, req *pb.GetWorkloadStatu
 
 	status, err := s.manager.GetStatus(ctx, req.Id)
 	if err != nil {
+		if pending := s.pendingStatusFromTasks(req.Id); pending != nil {
+			return &pb.GetWorkloadStatusResponse{Status: pending}, nil
+		}
 		return nil, err
 	}
 
 	return &pb.GetWorkloadStatusResponse{
 		Status: s.statusToProto(status),
 	}, nil
+}
+
+func (s *Server) pendingStatusFromTasks(workloadID string) *pb.WorkloadStatus {
+	if s.taskQueue == nil || strings.TrimSpace(workloadID) == "" {
+		return nil
+	}
+
+	snapshots := s.taskQueue.ListTaskSnapshots("")
+	var latest *task.TaskSnapshot
+	for i := range snapshots {
+		snap := snapshots[i]
+		if snap.WorkloadID != workloadID {
+			continue
+		}
+		if latest == nil || snap.CreatedAt.After(latest.CreatedAt) {
+			cp := snap
+			latest = &cp
+		}
+	}
+	if latest == nil {
+		return nil
+	}
+
+	switch latest.Status {
+	case task.TaskStatusPending:
+		return &pb.WorkloadStatus{
+			Id:          workloadID,
+			ActualState: pb.ActualState_ACTUAL_STATE_PENDING,
+			Message:     "task pending execution",
+			UpdatedAt:   time.Now().Unix(),
+			Metadata: map[string]string{
+				"task_id":     latest.ID,
+				"task_status": string(latest.Status),
+			},
+		}
+	case task.TaskStatusRunning:
+		return &pb.WorkloadStatus{
+			Id:          workloadID,
+			ActualState: pb.ActualState_ACTUAL_STATE_PENDING,
+			Message:     "task running",
+			UpdatedAt:   time.Now().Unix(),
+			Metadata: map[string]string{
+				"task_id":     latest.ID,
+				"task_status": string(latest.Status),
+			},
+		}
+	case task.TaskStatusFailed:
+		return &pb.WorkloadStatus{
+			Id:          workloadID,
+			ActualState: pb.ActualState_ACTUAL_STATE_FAILED,
+			Message:     strings.TrimSpace(latest.Error),
+			UpdatedAt:   time.Now().Unix(),
+			Metadata: map[string]string{
+				"task_id":     latest.ID,
+				"task_status": string(latest.Status),
+			},
+		}
+	default:
+		return nil
+	}
 }
 
 // ListWorkloads lists all workloads

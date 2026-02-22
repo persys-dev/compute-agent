@@ -66,6 +66,7 @@ type Queue struct {
 	logger     *logrus.Entry
 	mu         sync.RWMutex
 	maxWorkers int
+	stopOnce   sync.Once
 }
 
 // NewQueue creates a new task queue
@@ -112,7 +113,9 @@ func (q *Queue) Start(ctx context.Context) {
 
 // Stop stops the task queue
 func (q *Queue) Stop() {
-	close(q.stopCh)
+	q.stopOnce.Do(func() {
+		close(q.stopCh)
+	})
 }
 
 // worker processes tasks from the queue

@@ -18,6 +18,8 @@ import (
 )
 
 const managedDiskMarkerSuffix = ".persys-managed"
+const vmShutdownGracePeriod = 30 * time.Second
+const vmShutdownPollInterval = 500 * time.Millisecond
 
 // VMRuntime manages KVM virtual machine workloads via libvirt
 type VMRuntime struct {
@@ -117,39 +119,113 @@ func (v *VMRuntime) Create(ctx context.Context, workload *models.Workload) error
 }
 
 func (v *VMRuntime) Start(ctx context.Context, id string) error {
-	domain, err := v.conn.DomainLookupByName(id)
+	domain, found, err := v.lookupDomain(id)
 	if err != nil {
-		return fmt.Errorf("failed to lookup domain: %w", err)
+		return err
+	}
+	if !found {
+		return fmt.Errorf("failed to start domain %s: domain not found", id)
 	}
 
-	if err := v.conn.DomainCreate(domain); err != nil {
-		return fmt.Errorf("failed to start domain: %w", err)
+	state, _, err := v.conn.DomainGetState(domain, 0)
+	if err != nil {
+		return fmt.Errorf("failed to get domain state for %s: %w", id, err)
 	}
 
-	v.logger.Infof("Started VM: %s", id)
-	return nil
+	switch state {
+	case int32(libvirt.DomainRunning):
+		v.logger.Infof("VM already running, skipping start: %s", id)
+		return nil
+	case int32(libvirt.DomainPaused):
+		if err := v.conn.DomainResume(domain); err != nil {
+			return fmt.Errorf("failed to resume paused domain %s: %w", id, err)
+		}
+		v.logger.Infof("Resumed paused VM: %s", id)
+		return nil
+	default:
+		if err := v.conn.DomainCreate(domain); err != nil {
+			return fmt.Errorf("failed to start domain %s: %w", id, err)
+		}
+		v.logger.Infof("Started VM: %s", id)
+		return nil
+	}
 }
 
 func (v *VMRuntime) Stop(ctx context.Context, id string) error {
-	domain, err := v.conn.DomainLookupByName(id)
+	domain, found, err := v.lookupDomain(id)
 	if err != nil {
-		return fmt.Errorf("failed to lookup domain: %w", err)
+		return err
+	}
+	if !found {
+		v.logger.Infof("VM already absent while stopping, treating as stopped: %s", id)
+		return nil
 	}
 
-	// Graceful shutdown
+	state, _, err := v.conn.DomainGetState(domain, 0)
+	if err != nil {
+		return fmt.Errorf("failed to get domain state for %s: %w", id, err)
+	}
+
+	if state == int32(libvirt.DomainShutoff) || state == int32(libvirt.DomainShutdown) {
+		v.logger.Infof("VM already stopped, skipping stop: %s", id)
+		return nil
+	}
+
+	// Attempt graceful shutdown first. Paused guests often ignore ACPI shutdown.
 	if err := v.conn.DomainShutdown(domain); err != nil {
-		return fmt.Errorf("failed to shutdown domain: %w", err)
+		v.logger.Warnf("Graceful shutdown failed for %s, forcing stop: %v", id, err)
+		if err := v.conn.DomainDestroy(domain); err != nil && !isDomainNotFoundErr(err) {
+			return fmt.Errorf("failed to force stop domain %s: %w", id, err)
+		}
+		v.logger.Infof("Force stopped VM: %s", id)
+		return nil
 	}
 
-	v.logger.Infof("Stopped VM: %s", id)
-	return nil
+	waitCtx := ctx
+	if waitCtx == nil {
+		waitCtx = context.Background()
+	}
+	deadlineCtx, cancel := context.WithTimeout(waitCtx, vmShutdownGracePeriod)
+	defer cancel()
+
+	ticker := time.NewTicker(vmShutdownPollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-deadlineCtx.Done():
+			v.logger.Warnf("Timed out waiting for graceful shutdown for %s, forcing stop", id)
+			if err := v.conn.DomainDestroy(domain); err != nil && !isDomainNotFoundErr(err) {
+				return fmt.Errorf("failed to force stop domain %s after timeout: %w", id, err)
+			}
+			v.logger.Infof("Force stopped VM after timeout: %s", id)
+			return nil
+		case <-ticker.C:
+			curState, _, stateErr := v.conn.DomainGetState(domain, 0)
+			if stateErr != nil {
+				if isDomainNotFoundErr(stateErr) {
+					v.logger.Infof("VM disappeared during stop, treating as stopped: %s", id)
+					return nil
+				}
+				return fmt.Errorf("failed to verify shutdown state for %s: %w", id, stateErr)
+			}
+			if curState == int32(libvirt.DomainShutoff) || curState == int32(libvirt.DomainShutdown) {
+				v.logger.Infof("Stopped VM: %s", id)
+				return nil
+			}
+		}
+	}
 }
 
 func (v *VMRuntime) Delete(ctx context.Context, id string) error {
-	domain, err := v.conn.DomainLookupByName(id)
+	domain, found, err := v.lookupDomain(id)
 	if err != nil {
-		// Domain may already be gone, but cleanup deterministic cloud-init artifacts.
+		return err
+	}
+	if !found {
+		// Domain may already be gone, but cleanup deterministic artifacts.
 		v.cleanupDeterministicVMArtifacts(id)
+		v.logger.Infof("VM domain already absent, cleaned deterministic artifacts: %s", id)
 		return nil
 	}
 
@@ -166,14 +242,16 @@ func (v *VMRuntime) Delete(ctx context.Context, id string) error {
 		}
 	}
 
-	// Destroy if running
+	// Force-stop any active/paused domain before undefine.
 	state, _, err := v.conn.DomainGetState(domain, 0)
-	if err == nil && state == int32(libvirt.DomainRunning) {
-		_ = v.conn.DomainDestroy(domain)
+	if err == nil && state != int32(libvirt.DomainShutdown) && state != int32(libvirt.DomainShutoff) {
+		if destroyErr := v.conn.DomainDestroy(domain); destroyErr != nil && !isDomainNotFoundErr(destroyErr) {
+			return fmt.Errorf("failed to destroy domain before undefine: %w", destroyErr)
+		}
 	}
 
 	// Undefine the domain
-	if err := v.conn.DomainUndefine(domain); err != nil {
+	if err := v.conn.DomainUndefine(domain); err != nil && !isDomainNotFoundErr(err) {
 		return fmt.Errorf("failed to undefine domain: %w", err)
 	}
 
@@ -185,8 +263,11 @@ func (v *VMRuntime) Delete(ctx context.Context, id string) error {
 }
 
 func (v *VMRuntime) Status(ctx context.Context, id string) (models.ActualState, string, error) {
-	domain, err := v.conn.DomainLookupByName(id)
+	domain, found, err := v.lookupDomain(id)
 	if err != nil {
+		return models.ActualStateUnknown, "", err
+	}
+	if !found {
 		return models.ActualStateUnknown, "domain not found", nil
 	}
 
@@ -204,7 +285,7 @@ func (v *VMRuntime) Status(ctx context.Context, id string) (models.ActualState, 
 		message = "running"
 	case int32(libvirt.DomainPaused):
 		actualState = models.ActualStateStopped
-		message = "paused"
+		message = "paused (runtime frozen)"
 	case int32(libvirt.DomainShutdown), int32(libvirt.DomainShutoff):
 		actualState = models.ActualStateStopped
 		message = "shutdown"
@@ -321,6 +402,9 @@ func (v *VMRuntime) parseSpec(specMap map[string]interface{}) (*models.VMSpec, e
 
 // createDisk creates a QCOW2 disk image for the VM
 func (v *VMRuntime) createDisk(diskCfg *models.DiskConfig) error {
+	if diskCfg.Format == "" {
+		diskCfg.Format = "qcow2"
+	}
 	// Ensure the directory exists
 	diskDir := filepath.Dir(diskCfg.Path)
 	if err := os.MkdirAll(diskDir, 0755); err != nil {
@@ -357,6 +441,26 @@ func (v *VMRuntime) createDisk(diskCfg *models.DiskConfig) error {
 	}
 
 	return nil
+}
+
+func (v *VMRuntime) lookupDomain(id string) (libvirt.Domain, bool, error) {
+	domain, err := v.conn.DomainLookupByName(id)
+	if err != nil {
+		if isDomainNotFoundErr(err) {
+			return libvirt.Domain{}, false, nil
+		}
+		return libvirt.Domain{}, false, fmt.Errorf("failed to lookup domain %s: %w", id, err)
+	}
+	return domain, true, nil
+}
+
+func isDomainNotFoundErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "domain not found") ||
+		strings.Contains(msg, "no domain with matching name")
 }
 
 // createCloudInitISO creates a cloud-init ISO for VM configuration
