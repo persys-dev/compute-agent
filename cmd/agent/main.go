@@ -172,7 +172,10 @@ func main() {
 
 	// Register task handlers
 	taskQueue.RegisterHandler(task.TaskTypeApplyWorkload, func(ctx context.Context, t *task.Task) error {
-		w := t.Result.(*models.Workload)
+		w, ok := t.Result.(*models.Workload)
+		if !ok || w == nil {
+			return fmt.Errorf("invalid apply task payload for task %s", t.ID)
+		}
 		_, _, err := workloadMgr.ApplyWorkload(ctx, w)
 		if err != nil {
 			return fmt.Errorf("failed to apply workload %s: %w", w.ID, err)
@@ -181,7 +184,10 @@ func main() {
 	})
 
 	taskQueue.RegisterHandler(task.TaskTypeDeleteWorkload, func(ctx context.Context, t *task.Task) error {
-		workloadID := t.Result.(string)
+		workloadID, ok := t.Result.(string)
+		if !ok || workloadID == "" {
+			return fmt.Errorf("invalid delete task payload for task %s", t.ID)
+		}
 		err := workloadMgr.DeleteWorkload(ctx, workloadID)
 		if err != nil {
 			return fmt.Errorf("failed to delete workload %s: %w", workloadID, err)
@@ -249,6 +255,7 @@ func main() {
 	if reconciler != nil {
 		reconciler.Stop()
 	}
+	taskQueue.Stop()
 
 	if cancelControl != nil {
 		cancelControl()
