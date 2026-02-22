@@ -82,7 +82,7 @@ func Load() (*Config, error) {
 		TLSCAPath:          getEnv("PERSYS_TLS_CA", "/etc/persys/certs/agent/ca.pem"),
 		VaultEnabled:       getEnvAsBool("PERSYS_VAULT_ENABLED", true),
 		VaultAddr:          getEnv("PERSYS_VAULT_ADDR", "http://localhost:8200"),
-		VaultAuthMethod:    strings.ToLower(getEnv("PERSYS_VAULT_AUTH_METHOD", "token")),
+		VaultAuthMethod:    strings.ToLower(getEnv("PERSYS_VAULT_AUTH_METHOD", "approle")),
 		VaultToken:         getEnv("PERSYS_VAULT_TOKEN", ""),
 		VaultAppRoleID:     getEnv("PERSYS_VAULT_APPROLE_ROLE_ID", ""),
 		VaultAppSecretID:   getEnv("PERSYS_VAULT_APPROLE_SECRET_ID", ""),
