@@ -1,18 +1,18 @@
 {
   "name": "persys-vm",
-  "vcpus": 2,
+  "vcpus": 1,
   "memory_mb": 2048,
   "disks": [
     {
       "path": "/var/lib/libvirt/images/persys-vm.qcow2",
       "device": "vda",
       "format": "qcow2",
-      "size_gb": 30,
+      "size_gb": 10,
       "type": "disk",
-      "boot": false
+      "boot": true
     },
     {
-      "path": "/var/lib/libvirt/images/iso/fedora-coreos-42.20250803.3.0-live-iso.x86_64.iso",
+      "path": "/var/lib/libvirt/iso/ubuntu-24.04.2-live-server-amd64.iso",
       "device": "hdc",
       "format": "raw",
       "size_gb": 0,
