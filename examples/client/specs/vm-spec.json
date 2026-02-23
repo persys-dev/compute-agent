@@ -7,7 +7,7 @@
       "path": "/var/lib/libvirt/images/persys-vm.qcow2",
       "device": "vda",
       "format": "qcow2",
-      "size_gb": 10,
+      "size_gb": 5,
       "type": "disk",
       "boot": true
     },
