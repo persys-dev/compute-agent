@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	errors2 "github.com/persys/compute-agent/internal/errors"
-	"github.com/persys/compute-agent/internal/resources"
-	"github.com/persys/compute-agent/internal/retry"
-	"github.com/persys/compute-agent/internal/runtime"
-	"github.com/persys/compute-agent/pkg/models"
+	errors2 "github.com/persys-dev/compute-agent/internal/errors"
+	"github.com/persys-dev/compute-agent/internal/resources"
+	"github.com/persys-dev/compute-agent/internal/retry"
+	"github.com/persys-dev/compute-agent/internal/runtime"
+	"github.com/persys-dev/compute-agent/pkg/models"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -374,6 +374,132 @@ func TestApplyWorkload_SameRevision_Skipped(t *testing.T) {
 	mockRuntime.AssertNotCalled(t, "Start", mock.Anything, mock.Anything)
 
 	mockStore.AssertExpectations(t)
+}
+
+func TestApplyWorkload_SameRevision_DesiredStateChange_StopWithoutRecreate(t *testing.T) {
+	mockStore := new(MockStore)
+	mockRuntime := new(MockRuntime)
+
+	runtimeMgr := runtime.NewManager()
+	mockRuntime.On("Type").Return(models.WorkloadTypeContainer)
+	runtimeMgr.Register(mockRuntime)
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.FatalLevel)
+	manager := NewManager(mockStore, runtimeMgr, logger)
+
+	existing := &models.Workload{
+		ID:           "test-workload",
+		Type:         models.WorkloadTypeContainer,
+		RevisionID:   "rev-1",
+		DesiredState: models.DesiredStateRunning,
+		Spec:         map[string]interface{}{"image": "nginx:latest"},
+	}
+	request := &models.Workload{
+		ID:           "test-workload",
+		Type:         models.WorkloadTypeContainer,
+		RevisionID:   "rev-1",
+		DesiredState: models.DesiredStateStopped,
+		Spec:         map[string]interface{}{"image": "nginx:latest"},
+	}
+	status := &models.WorkloadStatus{
+		ID:           "test-workload",
+		Type:         models.WorkloadTypeContainer,
+		RevisionID:   "rev-1",
+		DesiredState: models.DesiredStateRunning,
+		ActualState:  models.ActualStateRunning,
+		Message:      "running",
+	}
+
+	mockStore.On("GetWorkload", "test-workload").Return(existing, nil)
+	mockStore.On("GetStatus", "test-workload").Return(status, nil)
+	mockStore.On("SaveWorkload", mock.MatchedBy(func(w *models.Workload) bool {
+		return w.ID == "test-workload" && w.DesiredState == models.DesiredStateStopped && w.RevisionID == "rev-1"
+	})).Return(nil).Once()
+	mockRuntime.On("Status", mock.Anything, "test-workload").Return(models.ActualStateRunning, "running", nil).Once()
+	mockRuntime.On("Stop", mock.Anything, "test-workload").Return(nil).Once()
+	mockRuntime.On("Status", mock.Anything, "test-workload").Return(models.ActualStateStopped, "stopped", nil).Once()
+	mockStore.On("SaveStatus", mock.MatchedBy(func(s *models.WorkloadStatus) bool {
+		return s.ID == "test-workload" &&
+			s.RevisionID == "rev-1" &&
+			s.DesiredState == models.DesiredStateStopped &&
+			s.ActualState == models.ActualStateStopped
+	})).Return(nil).Once()
+
+	got, skipped, err := manager.ApplyWorkload(context.Background(), request)
+	assert.NoError(t, err)
+	assert.False(t, skipped)
+	assert.Equal(t, models.DesiredStateStopped, got.DesiredState)
+	assert.Equal(t, models.ActualStateStopped, got.ActualState)
+
+	mockRuntime.AssertNotCalled(t, "Create", mock.Anything, mock.Anything)
+	mockRuntime.AssertNotCalled(t, "Delete", mock.Anything, mock.Anything)
+	mockRuntime.AssertNotCalled(t, "Start", mock.Anything, mock.Anything)
+	mockStore.AssertExpectations(t)
+	mockRuntime.AssertExpectations(t)
+}
+
+func TestApplyWorkload_SameRevision_DesiredStateChange_StartWithoutRecreate(t *testing.T) {
+	mockStore := new(MockStore)
+	mockRuntime := new(MockRuntime)
+
+	runtimeMgr := runtime.NewManager()
+	mockRuntime.On("Type").Return(models.WorkloadTypeContainer)
+	runtimeMgr.Register(mockRuntime)
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.FatalLevel)
+	manager := NewManager(mockStore, runtimeMgr, logger)
+
+	existing := &models.Workload{
+		ID:           "test-workload",
+		Type:         models.WorkloadTypeContainer,
+		RevisionID:   "rev-1",
+		DesiredState: models.DesiredStateStopped,
+		Spec:         map[string]interface{}{"image": "nginx:latest"},
+	}
+	request := &models.Workload{
+		ID:           "test-workload",
+		Type:         models.WorkloadTypeContainer,
+		RevisionID:   "rev-1",
+		DesiredState: models.DesiredStateRunning,
+		Spec:         map[string]interface{}{"image": "nginx:latest"},
+	}
+	status := &models.WorkloadStatus{
+		ID:           "test-workload",
+		Type:         models.WorkloadTypeContainer,
+		RevisionID:   "rev-1",
+		DesiredState: models.DesiredStateStopped,
+		ActualState:  models.ActualStateStopped,
+		Message:      "stopped",
+	}
+
+	mockStore.On("GetWorkload", "test-workload").Return(existing, nil)
+	mockStore.On("GetStatus", "test-workload").Return(status, nil)
+	mockStore.On("SaveWorkload", mock.MatchedBy(func(w *models.Workload) bool {
+		return w.ID == "test-workload" && w.DesiredState == models.DesiredStateRunning && w.RevisionID == "rev-1"
+	})).Return(nil).Once()
+	mockRuntime.On("Status", mock.Anything, "test-workload").Return(models.ActualStateStopped, "stopped", nil).Once()
+	mockRuntime.On("Start", mock.Anything, "test-workload").Return(nil).Once()
+	mockRuntime.On("Status", mock.Anything, "test-workload").Return(models.ActualStateRunning, "running", nil).Once()
+	mockStore.On("SaveStatus", mock.MatchedBy(func(s *models.WorkloadStatus) bool {
+		return s.ID == "test-workload" &&
+			s.RevisionID == "rev-1" &&
+			s.DesiredState == models.DesiredStateRunning &&
+			s.ActualState == models.ActualStateRunning
+	})).Return(nil).Once()
+
+	got, skipped, err := manager.ApplyWorkload(context.Background(), request)
+	assert.NoError(t, err)
+	assert.False(t, skipped)
+	assert.Equal(t, models.DesiredStateRunning, got.DesiredState)
+	assert.Equal(t, models.ActualStateRunning, got.ActualState)
+
+	mockRuntime.AssertNotCalled(t, "Create", mock.Anything, mock.Anything)
+	mockRuntime.AssertNotCalled(t, "Delete", mock.Anything, mock.Anything)
+	mockRuntime.AssertNotCalled(t, "Stop", mock.Anything, mock.Anything)
+	mockStore.AssertExpectations(t)
+	mockRuntime.AssertExpectations(t)
 }
 
 func TestApplyWorkload_SameRevisionFailedStatus_NotSkipped(t *testing.T) {

@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/persys/compute-agent/internal/runtime"
-	"github.com/persys/compute-agent/pkg/models"
+	"github.com/persys-dev/compute-agent/internal/runtime"
+	"github.com/persys-dev/compute-agent/pkg/models"
 	"github.com/sirupsen/logrus"
 )
 
