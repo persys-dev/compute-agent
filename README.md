@@ -5,6 +5,7 @@ The Persys Compute Agent is a production-grade node-level execution engine for t
 ## Features
 
 - **Multi-Runtime Support**: Docker containers, Docker Compose, and KVM/libvirt VMs
+- **Managed Volumes**: NFS and Ceph-RBD storage provisioning with automatic lifecycle management
 - **Idempotent Operations**: Revision-based tracking prevents duplicate work
 - **Secure Communication**: gRPC with mutual TLS authentication
 - **Persistent State**: bbolt-backed state store for crash recovery
