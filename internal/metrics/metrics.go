@@ -43,6 +43,12 @@ type Metrics struct {
 	GCOldFailedWorkloadsFound prometheus.Gauge
 	GCResourcesDeleted        *prometheus.CounterVec
 
+	// Task queue metrics
+	TaskQueueDepth    prometheus.Gauge
+	TaskLatency       *prometheus.HistogramVec
+	TaskExecutions    *prometheus.CounterVec
+	TaskFailuresTotal *prometheus.CounterVec
+
 	mu sync.RWMutex
 }
 
@@ -214,6 +220,43 @@ func NewMetrics(logger *logrus.Logger) (*Metrics, error) {
 			},
 			[]string{"resource_type"},
 		),
+
+		TaskQueueDepth: prometheus.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: "persys_agent",
+				Subsystem: "task",
+				Name:      "queue_depth",
+				Help:      "Current number of tasks waiting in queue channel.",
+			},
+		),
+		TaskLatency: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Namespace: "persys_agent",
+				Subsystem: "task",
+				Name:      "latency_seconds",
+				Help:      "Task execution latency by task type and status.",
+				Buckets:   prometheus.DefBuckets,
+			},
+			[]string{"type", "status"},
+		),
+		TaskExecutions: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "persys_agent",
+				Subsystem: "task",
+				Name:      "executions_total",
+				Help:      "Total task executions by type and final status.",
+			},
+			[]string{"type", "status"},
+		),
+		TaskFailuresTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "persys_agent",
+				Subsystem: "task",
+				Name:      "failures_total",
+				Help:      "Total failed task executions by type.",
+			},
+			[]string{"type"},
+		),
 	}
 
 	// Register all metrics
@@ -236,6 +279,10 @@ func NewMetrics(logger *logrus.Logger) (*Metrics, error) {
 		m.GCOrphanedResourcesFound,
 		m.GCOldFailedWorkloadsFound,
 		m.GCResourcesDeleted,
+		m.TaskQueueDepth,
+		m.TaskLatency,
+		m.TaskExecutions,
+		m.TaskFailuresTotal,
 	)
 
 	logger.Info("Metrics initialized successfully")
@@ -411,4 +458,24 @@ func (m *Metrics) RecordGCResourceDeleted(resourceType string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.GCResourcesDeleted.WithLabelValues(resourceType).Inc()
+}
+
+// SetTaskQueueDepth updates async task queue depth.
+func (m *Metrics) SetTaskQueueDepth(depth int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.TaskQueueDepth.Set(float64(depth))
+}
+
+// ObserveTaskExecution records execution latency and counters.
+func (m *Metrics) ObserveTaskExecution(taskType string, duration time.Duration, failed bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	status := "completed"
+	if failed {
+		status = "failed"
+		m.TaskFailuresTotal.WithLabelValues(taskType).Inc()
+	}
+	m.TaskExecutions.WithLabelValues(taskType, status).Inc()
+	m.TaskLatency.WithLabelValues(taskType, status).Observe(duration.Seconds())
 }
