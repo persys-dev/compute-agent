@@ -35,3 +35,33 @@ func TestClassifyError_ImagePullTimeout(t *testing.T) {
 		t.Fatalf("expected %s, got %s", FailureReasonImagePullTimeout, got)
 	}
 }
+
+func TestClassifyError_PortBindConflict(t *testing.T) {
+	err := errors.New("Error starting userland proxy: listen tcp4 0.0.0.0:8080: bind: address already in use")
+	got := ClassifyError(err)
+	if got != FailureReasonPortConflict {
+		t.Fatalf("expected %s, got %s", FailureReasonPortConflict, got)
+	}
+}
+
+func TestShouldRetry_UnknownErrorIsRetryable(t *testing.T) {
+	tracker := NewRetryTracker(DefaultRetryPolicy())
+	result, err := tracker.RecordFailure(FailureReasonUnknown, "unclassified runtime error")
+	if err != nil {
+		t.Fatalf("expected unknown error to be retryable, got error: %v", err)
+	}
+	if result == nil || !result.Retryable {
+		t.Fatalf("expected unknown error to be retryable, got %#v", result)
+	}
+}
+
+func TestShouldRetry_RuntimeErrorIsRetryable(t *testing.T) {
+	tracker := NewRetryTracker(DefaultRetryPolicy())
+	result, err := tracker.RecordFailure(FailureReasonRuntimeError, "container exited unexpectedly")
+	if err != nil {
+		t.Fatalf("expected runtime error to be retryable, got error: %v", err)
+	}
+	if result == nil || !result.Retryable {
+		t.Fatalf("expected runtime error to be retryable, got %#v", result)
+	}
+}
