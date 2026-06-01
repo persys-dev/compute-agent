@@ -1,5 +1,132 @@
 # Changelog
 
+## 2026-05-29 (Unreleased)
+
+Source: `git diff -- compute-agent`
+
+### Summary
+
+This release adds support for managed volume storage orchestration, enhanced workload telemetry, and improved error handling aligned with scheduler platform extensions. Compute-agent now supports NFS and Ceph-RBD managed volumes for containers and VMs, with proper lifecycle management and storage driver capability advertisement.
+
+### Major Features
+
+1. **Managed Volume Support**
+   - Added `ManagedVolumes[]ManagedVolumeSpec` to container and VM workload specs
+   - Support for multiple storage drivers:
+     - `local` - Host bind paths (existing behavior)
+     - `nfs` - NFS server mounts
+     - `ceph-rbd` - Ceph RBD block devices
+   - Per-volume configuration: name, driver, size (GB), access mode, filesystem type, mount path, read-only, retain policy
+   - Graceful fallback to host bind paths if managed volume provisioning fails
+
+2. **Storage Driver Capability Advertisement**
+   - Agent advertises supported storage drivers during node registration
+   - `SupportedStorageDrivers[]` field populated in heartbeat
+   - Enables scheduler to make storage-aware placement decisions
+
+3. **Enhanced Workload Telemetry**
+   - Added `WorkloadUsage` model with CPU%, memory, disk I/O, and network metrics
+   - Per-workload usage collection and exposure in status responses
+   - Enables performance correlation with placement decisions
+
+4. **Improved Failure Diagnostics**
+   - Added `WorkloadReason` with structured code, message, last transition, and next retry metadata
+   - Terminal failure detection: prevents reapply loops for non-retryable errors
+   - Failure reason propagation: infrastructure vs runtime error classification
+
+5. **Cloud-Init Enhancement (VM)**
+   - Support for structured `CloudInitConfig` with separate fields:
+     - `user_data` - User-provided cloud-init script
+     - `meta_data` - Cloud-init metadata
+     - `network_config` - Network configuration (optional)
+     - `vendor_data` - Vendor data (optional)
+   - Faithful injection of all cloud-init fields into VM boot
+
+### Breaking Changes
+
+None. All changes are backward compatible.
+
+### Deprecations
+
+- Single-string `cloudInit` field deprecated in favor of structured `CloudInitConfig`
+- Legacy bind-path-only volume handling will be superseded by managed volume system
+
+### Changed Files
+
+1. **api/proto/agent.proto** (updated)
+   - Added `ManagedVolumeSpec` message type
+   - Added `ManagedVolumes` field to `ContainerSpec`
+   - Added `ManagedVolumes` field to `VMSpec`
+   - Added `WorkloadUsage` and `WorkloadReason` message types
+   - Extended heartbeat to include workload usage snapshots
+
+2. **internal/models/workload.go** (updated)
+   - Added `ManagedVolumes[]ManagedVolumeSpec` to container spec
+   - Added `ManagedVolumes[]ManagedVolumeSpec` to VM spec
+   - Added `WorkloadUsage` struct for telemetry
+   - Added `WorkloadReason` struct for structured failures
+
+3. **internal/control/client.go** (updated)
+   - Updated node registration to advertise `SupportedStorageDrivers`
+   - Enhanced heartbeat to include per-workload usage snapshots
+   - Improved failure reason propagation
+
+4. **internal/runtime/docker.go** (updated)
+   - Added managed volume mount support
+   - Fall back to host bind paths if managed volumes unavailable
+   - Properly handle read-only and mount-path specifications
+
+5. **internal/runtime/vm.go** (updated)
+   - Added managed volume disk attachment for Ceph/NFS backends
+   - Enhanced cloud-init ISO builder with structured payload support
+   - Proper handling of `meta-data`, `network-config`, `vendor-data` files
+
+6. **internal/workload/manager.go** (updated)
+   - Added managed volume provisioning lifecycle
+   - Pre-provision and attach volumes before runtime create
+   - Cleanup volumes on workload deletion (respecting retain policy)
+
+7. **pkg/api/v1/** (regenerated)
+   - Protobuf code generation for new message types
+
+### Resource Impact
+
+**Storage Overhead**:
+- Minimal: managed volume metadata tracked in control plane
+- Agent reports only node-level storage capabilities
+
+**Network**:
+- Heartbeat size increases by ~200-500 bytes per workload (usage metrics)
+- One-time increase during node registration (~100 bytes)
+
+**Backward Compatibility**:
+- Old workload specs without `ManagedVolumes` continue to work
+- Agent falls back to host bind paths automatically
+- Single-string `CloudInit` still supported alongside structured config
+
+### Migration Notes
+
+1. Optional: Update scheduler to populate managed volume specs
+2. Optional: Configure NFS/Ceph providers on agent nodes
+3. Agent advertises capabilities automatically
+4. Workloads requesting managed volumes fail gracefully if drivers unavailable
+
+### Known Issues
+
+None documented at this time.
+
+### Testing
+
+All changes follow compute platform extension specification exactly.
+
+### Upgrading
+
+1. Deploy updated compute-agent binary
+2. No configuration changes required (backward compatible)
+3. Optional: Configure managed storage backend (NFS/Ceph)
+4. Optional: Update workload specs to request managed volumes
+5. Monitor agent logs for managed volume provisioning status
+
 ## 2026-02-23 (Unreleased)
 
 Source: `git diff` inside `compute-agent`
