@@ -52,19 +52,21 @@ type WorkloadStatus struct {
 	CreatedAt    time.Time         `json:"created_at"`
 	UpdatedAt    time.Time         `json:"updated_at"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
+	Usage        *WorkloadUsage    `json:"usage,omitempty"`
 }
 
 // ContainerSpec defines Docker container configuration
 type ContainerSpec struct {
-	Image         string            `json:"image"`
-	Command       []string          `json:"command,omitempty"`
-	Args          []string          `json:"args,omitempty"`
-	Env           map[string]string `json:"env,omitempty"`
-	Volumes       []VolumeMount     `json:"volumes,omitempty"`
-	Ports         []PortMapping     `json:"ports,omitempty"`
-	Resources     *ResourceLimits   `json:"resources,omitempty"`
-	RestartPolicy *RestartPolicy    `json:"restart_policy,omitempty"`
-	Labels        map[string]string `json:"labels,omitempty"`
+	Image          string              `json:"image"`
+	Command        []string            `json:"command,omitempty"`
+	Args           []string            `json:"args,omitempty"`
+	Env            map[string]string   `json:"env,omitempty"`
+	Volumes        []VolumeMount       `json:"volumes,omitempty"`
+	ManagedVolumes []ManagedVolumeSpec `json:"managed_volumes,omitempty"`
+	Ports          []PortMapping       `json:"ports,omitempty"`
+	Resources      *ResourceLimits     `json:"resources,omitempty"`
+	RestartPolicy  *RestartPolicy      `json:"restart_policy,omitempty"`
+	Labels         map[string]string   `json:"labels,omitempty"`
 }
 
 // ComposeSpec defines Docker Compose configuration
@@ -76,14 +78,15 @@ type ComposeSpec struct {
 
 // VMSpec defines virtual machine configuration
 type VMSpec struct {
-	Name            string            `json:"name"`
-	VCPUs           int               `json:"vcpus"`
-	MemoryMB        int64             `json:"memory_mb"`
-	Disks           []DiskConfig      `json:"disks"`
-	Networks        []NetworkConfig   `json:"networks"`
-	CloudInit       string            `json:"cloud_init,omitempty"` // user-data script
-	Metadata        map[string]string `json:"metadata,omitempty"`
-	CloudInitConfig *CloudInitConfig  `json:"cloud_init_config,omitempty"`
+	Name            string              `json:"name"`
+	VCPUs           int                 `json:"vcpus"`
+	MemoryMB        int64               `json:"memory_mb"`
+	Disks           []DiskConfig        `json:"disks"`
+	Networks        []NetworkConfig     `json:"networks"`
+	CloudInit       string              `json:"cloud_init,omitempty"` // user-data script
+	Metadata        map[string]string   `json:"metadata,omitempty"`
+	CloudInitConfig *CloudInitConfig    `json:"cloud_init_config,omitempty"`
+	ManagedVolumes  []ManagedVolumeSpec `json:"managed_volumes,omitempty"`
 }
 
 // CloudInitConfig defines advanced cloud-init settings
@@ -92,6 +95,32 @@ type CloudInitConfig struct {
 	MetaData      string `json:"meta_data,omitempty"`
 	NetworkConfig string `json:"network_config,omitempty"`
 	VendorData    string `json:"vendor_data,omitempty"`
+}
+
+// ManagedVolumeSpec describes a provider-backed volume request.
+type ManagedVolumeSpec struct {
+	Name         string `json:"name"`
+	Driver       string `json:"driver"`
+	SizeGB       int64  `json:"size_gb,omitempty"`
+	AccessMode   string `json:"access_mode,omitempty"`
+	FSType       string `json:"fs_type,omitempty"`
+	MountPath    string `json:"mount_path,omitempty"`
+	ReadOnly     bool   `json:"read_only,omitempty"`
+	RetainPolicy string `json:"retain_policy,omitempty"`
+}
+
+// WorkloadUsage stores the latest per-workload utilization sample.
+type WorkloadUsage struct {
+	WorkloadID     string    `json:"workload_id,omitempty"`
+	Type           string    `json:"type,omitempty"`
+	CPUPercent     float64   `json:"cpu_percent,omitempty"`
+	MemoryBytes    int64     `json:"memory_bytes,omitempty"`
+	DiskReadBytes  int64     `json:"disk_read_bytes,omitempty"`
+	DiskWriteBytes int64     `json:"disk_write_bytes,omitempty"`
+	NetRXBytes     int64     `json:"net_rx_bytes,omitempty"`
+	NetTXBytes     int64     `json:"net_tx_bytes,omitempty"`
+	CollectedAt    time.Time `json:"collected_at,omitempty"`
+	Source         string    `json:"source,omitempty"`
 }
 
 // VolumeMount represents a volume mount
