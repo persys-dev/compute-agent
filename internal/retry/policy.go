@@ -29,6 +29,7 @@ const (
 	// Specification failures
 	FailureReasonInvalidSpec   FailureReason = "INVALID_SPECIFICATION"
 	FailureReasonInvalidConfig FailureReason = "INVALID_CONFIGURATION"
+	FailureReasonPortConflict  FailureReason = "PORT_BIND_CONFLICT"
 
 	// Runtime failures
 	FailureReasonRuntimeError     FailureReason = "RUNTIME_ERROR"
@@ -45,7 +46,9 @@ func (f FailureReason) IsTransient() bool {
 		FailureReasonNetworkTimeout,
 		FailureReasonNetworkUnreachable,
 		FailureReasonDNSResolution,
-		FailureReasonRuntimeUnhealthy:
+		FailureReasonRuntimeUnhealthy,
+		FailureReasonRuntimeError,
+		FailureReasonUnknown:
 		return true
 	default:
 		return false
@@ -57,7 +60,8 @@ func (f FailureReason) IsPermanent() bool {
 	switch f {
 	case FailureReasonInvalidImage,
 		FailureReasonInvalidSpec,
-		FailureReasonInvalidConfig:
+		FailureReasonInvalidConfig,
+		FailureReasonPortConflict:
 		return true
 	default:
 		return false
@@ -265,6 +269,10 @@ func ClassifyError(err error) FailureReason {
 		return FailureReasonInvalidImage
 	}
 
+	if isPortBindConflict(errMsg) {
+		return FailureReasonPortConflict
+	}
+
 	if isNetworkError(errMsg) {
 		if isTimeoutError(errMsg) {
 			return FailureReasonNetworkTimeout
@@ -314,6 +322,12 @@ func isResourceError(msg string) bool {
 
 func isSpecError(msg string) bool {
 	return contains(msg, "invalid", "malformed", "schema", "validation")
+}
+
+func isPortBindConflict(msg string) bool {
+	return contains(msg, "bind", "address already in use") ||
+		contains(msg, "port", "already allocated") ||
+		contains(msg, "error starting userland proxy")
 }
 
 func contains(str string, keywords ...string) bool {
