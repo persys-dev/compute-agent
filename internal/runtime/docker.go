@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,8 +14,9 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
-	"github.com/persys/compute-agent/pkg/models"
+	"github.com/persys-dev/compute-agent/pkg/models"
 	"github.com/sirupsen/logrus"
 )
 
@@ -27,6 +29,7 @@ type DockerRuntime struct {
 const (
 	managedLabelKey      = "persys.managed"
 	managedWorkloadIDKey = "persys.workload_id"
+	managedRevisionKey   = "persys.revision_id"
 )
 
 // NewDockerRuntime creates a new Docker runtime
@@ -79,6 +82,15 @@ func (d *DockerRuntime) Create(ctx context.Context, workload *models.Workload) e
 	// Force ownership labels so GC/reconciliation only targets agent-managed containers.
 	labels[managedLabelKey] = "true"
 	labels[managedWorkloadIDKey] = workload.ID
+	labels[managedRevisionKey] = strings.TrimSpace(workload.RevisionID)
+
+	reused, err := d.ensureContainerReadyForCreate(ctx, workload)
+	if err != nil {
+		return err
+	}
+	if reused {
+		return nil
+	}
 
 	containerConfig := &container.Config{
 		Image:  spec.Image,
@@ -111,16 +123,25 @@ func (d *DockerRuntime) Create(ctx context.Context, workload *models.Workload) e
 	}
 
 	// Create container
-	resp, err := d.client.ContainerCreate(
-		ctx,
-		containerConfig,
-		hostConfig,
-		nil,
-		nil,
-		workload.ID,
-	)
+	resp, err := d.client.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, workload.ID)
 	if err != nil {
-		return fmt.Errorf("failed to create container: %w", err)
+		if !isContainerNameConflict(err) {
+			return fmt.Errorf("failed to create container: %w", err)
+		}
+
+		d.logger.Warnf("Container create reported name conflict for %s; inspecting existing container", workload.ID)
+		reused, conflictErr := d.ensureContainerReadyForCreate(ctx, workload)
+		if conflictErr != nil {
+			return conflictErr
+		}
+		if reused {
+			return nil
+		}
+
+		resp, err = d.client.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, workload.ID)
+		if err != nil {
+			return fmt.Errorf("failed to create container after resolving name conflict: %w", err)
+		}
 	}
 
 	d.logger.Infof("Created container: %s (%s)", workload.ID, resp.ID)
@@ -224,7 +245,178 @@ func (d *DockerRuntime) Healthy(ctx context.Context) error {
 	return err
 }
 
+// StatusMetadata returns container-specific status details, including stderr when exited.
+func (d *DockerRuntime) StatusMetadata(ctx context.Context, id string) (map[string]string, error) {
+	info, err := d.client.ContainerInspect(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect container: %w", err)
+	}
+
+	metadata := map[string]string{
+		"container.id":    shortContainerID(info.ID),
+		"container.state": containerStateText(&info),
+	}
+	if info.Config != nil {
+		if image := strings.TrimSpace(info.Config.Image); image != "" {
+			metadata["container.image"] = image
+		}
+	}
+	if info.State != nil {
+		metadata["container.exit_code"] = fmt.Sprintf("%d", info.State.ExitCode)
+		if started := strings.TrimSpace(info.State.StartedAt); started != "" {
+			metadata["container.started_at"] = started
+		}
+		if finished := strings.TrimSpace(info.State.FinishedAt); finished != "" {
+			metadata["container.finished_at"] = finished
+		}
+		if stateErr := strings.TrimSpace(info.State.Error); stateErr != "" {
+			metadata["container.runtime_error"] = stateErr
+		}
+	}
+
+	if info.State != nil && (info.State.ExitCode != 0 || info.State.Dead) {
+		stderrText, stderrErr := d.getContainerStderr(ctx, id)
+		if stderrErr != nil {
+			metadata["container.stderr_error"] = stderrErr.Error()
+		} else if strings.TrimSpace(stderrText) != "" {
+			metadata["container.stderr"] = stderrText
+		}
+	}
+
+	return metadata, nil
+}
+
+func (d *DockerRuntime) ensureContainerReadyForCreate(ctx context.Context, workload *models.Workload) (bool, error) {
+	info, err := d.client.ContainerInspect(ctx, workload.ID)
+	if err != nil {
+		if client.IsErrNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to inspect container %s before create: %w", workload.ID, err)
+	}
+
+	labels := map[string]string{}
+	if info.Config != nil && info.Config.Labels != nil {
+		labels = info.Config.Labels
+	}
+	state := containerStateText(&info)
+
+	isManaged := strings.EqualFold(strings.TrimSpace(labels[managedLabelKey]), "true")
+	managedWorkloadID := strings.TrimSpace(labels[managedWorkloadIDKey])
+	existingRevision := strings.TrimSpace(labels[managedRevisionKey])
+	desiredRevision := strings.TrimSpace(workload.RevisionID)
+
+	if isManaged && managedWorkloadID == workload.ID {
+		if desiredRevision == "" || existingRevision == "" || existingRevision == desiredRevision {
+			d.logger.WithFields(logrus.Fields{
+				"workload_id":       workload.ID,
+				"container_id":      shortContainerID(info.ID),
+				"status":            state,
+				"existing_revision": existingRevision,
+			}).Warn("Container already exists for managed workload; reusing existing container")
+			return true, nil
+		}
+
+		d.logger.WithFields(logrus.Fields{
+			"workload_id":       workload.ID,
+			"container_id":      shortContainerID(info.ID),
+			"status":            state,
+			"existing_revision": existingRevision,
+			"desired_revision":  desiredRevision,
+		}).Warn("Found stale managed container with revision mismatch; removing before recreate")
+
+		if err := d.client.ContainerRemove(ctx, workload.ID, container.RemoveOptions{Force: true}); err != nil {
+			return false, fmt.Errorf(
+				"failed to remove stale managed container %s (id=%s status=%s existing_revision=%s desired_revision=%s): %w",
+				workload.ID,
+				shortContainerID(info.ID),
+				state,
+				existingRevision,
+				desiredRevision,
+				err,
+			)
+		}
+
+		return false, nil
+	}
+
+	return false, fmt.Errorf(
+		"container name %q is already in use (id=%s status=%s managed=%t managed_workload_id=%q managed_revision=%q)",
+		workload.ID,
+		shortContainerID(info.ID),
+		state,
+		isManaged,
+		managedWorkloadID,
+		existingRevision,
+	)
+}
+
 // Helper functions
+
+func isContainerNameConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "is already in use by container") ||
+		strings.Contains(msg, "already exists")
+}
+
+func containerStateText(info *types.ContainerJSON) string {
+	if info == nil || info.State == nil {
+		return "unknown"
+	}
+	if strings.TrimSpace(info.State.Status) != "" {
+		return strings.TrimSpace(info.State.Status)
+	}
+	if info.State.Running {
+		return "running"
+	}
+	if info.State.Paused {
+		return "paused"
+	}
+	if info.State.Restarting {
+		return "restarting"
+	}
+	return "unknown"
+}
+
+func shortContainerID(id string) string {
+	id = strings.TrimSpace(id)
+	if len(id) <= 12 {
+		return id
+	}
+	return id[:12]
+}
+
+func (d *DockerRuntime) getContainerStderr(ctx context.Context, id string) (string, error) {
+	reader, err := d.client.ContainerLogs(ctx, id, container.LogsOptions{
+		ShowStdout: false,
+		ShowStderr: true,
+		Timestamps: false,
+		Details:    false,
+		Follow:     false,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to read container logs: %w", err)
+	}
+	defer reader.Close()
+
+	raw, err := io.ReadAll(reader)
+	if err != nil {
+		return "", fmt.Errorf("failed to read container stderr stream: %w", err)
+	}
+	if len(raw) == 0 {
+		return "", nil
+	}
+
+	var stderr bytes.Buffer
+	if _, err := stdcopy.StdCopy(io.Discard, &stderr, bytes.NewReader(raw)); err != nil {
+		// Non-multiplexed stream (e.g. TTY-enabled); treat raw output as stderr.
+		return strings.TrimSpace(string(raw)), nil
+	}
+	return strings.TrimSpace(stderr.String()), nil
+}
 
 func (d *DockerRuntime) pullImageWithRetry(ctx context.Context, image string, maxRetries int) error {
 	var lastErr error
