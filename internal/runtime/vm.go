@@ -2,29 +2,45 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"net"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/digitalocean/go-libvirt"
-	"github.com/persys/compute-agent/pkg/models"
+	"github.com/persys-dev/compute-agent/pkg/models"
 	"github.com/sirupsen/logrus"
 )
 
 const managedDiskMarkerSuffix = ".persys-managed"
 const vmShutdownGracePeriod = 30 * time.Second
 const vmShutdownPollInterval = 500 * time.Millisecond
+const maxCloudInitPayloadBytes = 256 * 1024
 
 // VMRuntime manages KVM virtual machine workloads via libvirt
 type VMRuntime struct {
-	conn   *libvirt.Libvirt
-	logger *logrus.Entry
+	conn     *libvirt.Libvirt
+	logger   *logrus.Entry
+	seedMu   sync.RWMutex
+	seedInfo map[string]cloudInitSeedInfo
+}
+
+type cloudInitSeedInfo struct {
+	Path       string
+	Checksum   string
+	SizeBytes  int
+	PreparedAt time.Time
 }
 
 func NewVMRuntime(uri string, logger *logrus.Logger) (*VMRuntime, error) {
@@ -47,8 +63,9 @@ func NewVMRuntime(uri string, logger *logrus.Logger) (*VMRuntime, error) {
 	}
 
 	return &VMRuntime{
-		conn:   conn,
-		logger: logger.WithField("runtime", "vm"),
+		conn:     conn,
+		logger:   logger.WithField("runtime", "vm"),
+		seedInfo: make(map[string]cloudInitSeedInfo),
 	}, nil
 }
 
@@ -76,9 +93,12 @@ func (v *VMRuntime) Create(ctx context.Context, workload *models.Workload) error
 
 	// Create cloud-init ISO if needed
 	if spec.CloudInit != "" || spec.CloudInitConfig != nil {
-		isoPath, err := v.createCloudInitISO(workload.ID, spec)
+		isoPath, seedInfo, err := v.createCloudInitISO(workload.ID, spec)
 		if err != nil {
 			return fmt.Errorf("failed to create cloud-init ISO: %w", err)
+		}
+		if seedInfo != nil {
+			v.setSeedInfo(workload.ID, *seedInfo)
 		}
 		if isoPath != "" {
 			// Add ISO to disks - mark as bootable CD-ROM
@@ -92,10 +112,16 @@ func (v *VMRuntime) Create(ctx context.Context, workload *models.Workload) error
 			})
 		}
 	}
+	if spec.CloudInit == "" && spec.CloudInitConfig == nil {
+		v.clearSeedInfo(workload.ID)
+	}
 
 	// Create disk files first
 	for _, diskCfg := range spec.Disks {
 		if diskCfg.Type != models.DiskTypeCDROM {
+			if isNetworkDiskPath(diskCfg.Path) {
+				continue
+			}
 			if err := v.createDisk(&diskCfg); err != nil {
 				return fmt.Errorf("failed to create disk %s: %w", diskCfg.Path, err)
 			}
@@ -257,6 +283,7 @@ func (v *VMRuntime) Delete(ctx context.Context, id string) error {
 
 	v.cleanupDiskArtifacts(id, diskPaths)
 	v.cleanupDeterministicVMArtifacts(id)
+	v.clearSeedInfo(id)
 
 	v.logger.Infof("Deleted VM: %s", id)
 	return nil
@@ -282,22 +309,23 @@ func (v *VMRuntime) Status(ctx context.Context, id string) (models.ActualState, 
 	switch state {
 	case int32(libvirt.DomainRunning):
 		actualState = models.ActualStateRunning
-		message = "running"
+		message = fmt.Sprintf("running (reason=%s)", vmDomainReasonText(state, reason))
 	case int32(libvirt.DomainPaused):
-		actualState = models.ActualStateStopped
-		message = "paused (runtime frozen)"
+		// Paused is treated as transitional so upper layers avoid destructive re-apply loops.
+		actualState = models.ActualStatePending
+		message = fmt.Sprintf("paused (runtime frozen, reason=%s)", vmDomainReasonText(state, reason))
 	case int32(libvirt.DomainShutdown), int32(libvirt.DomainShutoff):
 		actualState = models.ActualStateStopped
-		message = "shutdown"
+		message = fmt.Sprintf("shutdown (reason=%s)", vmDomainReasonText(state, reason))
 	case int32(libvirt.DomainCrashed):
 		actualState = models.ActualStateFailed
-		message = "crashed"
+		message = fmt.Sprintf("crashed (reason=%s)", vmDomainReasonText(state, reason))
 	case int32(libvirt.DomainBlocked), int32(libvirt.DomainNostate):
 		actualState = models.ActualStatePending
-		message = fmt.Sprintf("state: %d, reason: %d", state, reason)
+		message = fmt.Sprintf("%s (reason=%s)", vmDomainStateName(state), vmDomainReasonText(state, reason))
 	default:
 		actualState = models.ActualStateUnknown
-		message = fmt.Sprintf("unknown state: %d", state)
+		message = fmt.Sprintf("unknown state=%d reason=%d", state, reason)
 	}
 
 	return actualState, message, nil
@@ -309,17 +337,25 @@ func (v *VMRuntime) StatusMetadata(ctx context.Context, id string) (map[string]s
 	if err != nil {
 		return nil, fmt.Errorf("failed to lookup domain: %w", err)
 	}
+	metadata := make(map[string]string)
+
+	state, reason, err := v.conn.DomainGetState(domain, 0)
+	if err == nil {
+		metadata["vm.domain_state"] = vmDomainStateName(state)
+		metadata["vm.domain_state_code"] = strconv.Itoa(int(state))
+		metadata["vm.domain_reason"] = vmDomainReasonText(state, reason)
+		metadata["vm.domain_reason_code"] = strconv.Itoa(int(reason))
+	}
 
 	// Prefer DHCP lease source first, then guest agent fallback.
 	ifaces, err := v.conn.DomainInterfaceAddresses(domain, uint32(libvirt.DomainInterfaceAddressesSrcLease), 0)
 	if err != nil || len(ifaces) == 0 {
 		ifaces, err = v.conn.DomainInterfaceAddresses(domain, uint32(libvirt.DomainInterfaceAddressesSrcAgent), 0)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get domain interface addresses: %w", err)
+			metadata["vm.network_lookup_error"] = err.Error()
+			return metadata, nil
 		}
 	}
-
-	metadata := make(map[string]string)
 	var ips []string
 	var macs []string
 	var ifaceParts []string
@@ -357,8 +393,156 @@ func (v *VMRuntime) StatusMetadata(ctx context.Context, id string) (map[string]s
 	if len(ifaceParts) > 0 {
 		metadata["vm.interfaces"] = strings.Join(ifaceParts, ",")
 	}
+	if seedInfo, ok := v.getSeedInfo(id); ok {
+		metadata["vm.cloud_init_seed_path"] = seedInfo.Path
+		metadata["vm.cloud_init_seed_checksum"] = seedInfo.Checksum
+		metadata["vm.cloud_init_seed_size_bytes"] = strconv.Itoa(seedInfo.SizeBytes)
+		metadata["vm.cloud_init_seed_prepared_at"] = seedInfo.PreparedAt.UTC().Format(time.RFC3339)
+	}
 
 	return metadata, nil
+}
+
+func vmDomainStateName(state int32) string {
+	switch libvirt.DomainState(state) {
+	case libvirt.DomainRunning:
+		return "running"
+	case libvirt.DomainBlocked:
+		return "blocked"
+	case libvirt.DomainPaused:
+		return "paused"
+	case libvirt.DomainShutdown:
+		return "shutdown"
+	case libvirt.DomainShutoff:
+		return "shutoff"
+	case libvirt.DomainCrashed:
+		return "crashed"
+	case libvirt.DomainPmsuspended:
+		return "pmsuspended"
+	case libvirt.DomainNostate:
+		return "nostate"
+	default:
+		return "unknown"
+	}
+}
+
+func vmDomainReasonText(state, reason int32) string {
+	switch libvirt.DomainState(state) {
+	case libvirt.DomainPaused:
+		switch libvirt.DomainPausedReason(reason) {
+		case libvirt.DomainPausedUser:
+			return "user"
+		case libvirt.DomainPausedMigration:
+			return "migration"
+		case libvirt.DomainPausedSave:
+			return "save"
+		case libvirt.DomainPausedDump:
+			return "dump"
+		case libvirt.DomainPausedIoerror:
+			return "io-error"
+		case libvirt.DomainPausedWatchdog:
+			return "watchdog"
+		case libvirt.DomainPausedFromSnapshot:
+			return "from-snapshot"
+		case libvirt.DomainPausedShuttingDown:
+			return "shutting-down"
+		case libvirt.DomainPausedSnapshot:
+			return "snapshot"
+		case libvirt.DomainPausedCrashed:
+			return "crashed"
+		case libvirt.DomainPausedStartingUp:
+			return "starting-up"
+		case libvirt.DomainPausedPostcopy:
+			return "postcopy"
+		case libvirt.DomainPausedPostcopyFailed:
+			return "postcopy-failed"
+		default:
+			return "unknown"
+		}
+	case libvirt.DomainShutoff:
+		switch libvirt.DomainShutoffReason(reason) {
+		case libvirt.DomainShutoffShutdown:
+			return "shutdown"
+		case libvirt.DomainShutoffDestroyed:
+			return "destroyed"
+		case libvirt.DomainShutoffCrashed:
+			return "crashed"
+		case libvirt.DomainShutoffMigrated:
+			return "migrated"
+		case libvirt.DomainShutoffSaved:
+			return "saved"
+		case libvirt.DomainShutoffFailed:
+			return "failed"
+		case libvirt.DomainShutoffFromSnapshot:
+			return "from-snapshot"
+		case libvirt.DomainShutoffDaemon:
+			return "daemon"
+		default:
+			return "unknown"
+		}
+	case libvirt.DomainRunning:
+		switch libvirt.DomainRunningReason(reason) {
+		case libvirt.DomainRunningBooted:
+			return "booted"
+		case libvirt.DomainRunningMigrated:
+			return "migrated"
+		case libvirt.DomainRunningRestored:
+			return "restored"
+		case libvirt.DomainRunningFromSnapshot:
+			return "from-snapshot"
+		case libvirt.DomainRunningUnpaused:
+			return "unpaused"
+		case libvirt.DomainRunningMigrationCanceled:
+			return "migration-canceled"
+		case libvirt.DomainRunningSaveCanceled:
+			return "save-canceled"
+		case libvirt.DomainRunningWakeup:
+			return "wakeup"
+		case libvirt.DomainRunningCrashed:
+			return "crashed"
+		case libvirt.DomainRunningPostcopy:
+			return "postcopy"
+		default:
+			return "unknown"
+		}
+	case libvirt.DomainShutdown:
+		switch libvirt.DomainShutdownReason(reason) {
+		case libvirt.DomainShutdownUser:
+			return "user"
+		default:
+			return "unknown"
+		}
+	case libvirt.DomainCrashed:
+		switch libvirt.DomainCrashedReason(reason) {
+		case libvirt.DomainCrashedPanicked:
+			return "panicked"
+		default:
+			return "unknown"
+		}
+	case libvirt.DomainPmsuspended:
+		switch libvirt.DomainPMSuspendedReason(reason) {
+		case libvirt.DomainPmsuspendedUnknown:
+			return "unknown"
+		default:
+			return "unknown"
+		}
+	case libvirt.DomainNostate:
+		switch libvirt.DomainNostateReason(reason) {
+		case libvirt.DomainNostateUnknown:
+			return "unknown"
+		default:
+			return "unknown"
+		}
+	case libvirt.DomainBlocked:
+		switch libvirt.DomainBlockedReason(reason) {
+		case libvirt.DomainBlockedUnknown:
+			return "unknown"
+		default:
+			return "unknown"
+		}
+	default:
+		return "unknown"
+	}
 }
 
 func (v *VMRuntime) List(ctx context.Context) ([]string, error) {
@@ -464,29 +648,35 @@ func isDomainNotFoundErr(err error) bool {
 }
 
 // createCloudInitISO creates a cloud-init ISO for VM configuration
-func (v *VMRuntime) createCloudInitISO(vmID string, spec *models.VMSpec) (string, error) {
+func (v *VMRuntime) createCloudInitISO(vmID string, spec *models.VMSpec) (string, *cloudInitSeedInfo, error) {
 	// Only create if cloud-init is specified
 	if spec.CloudInit == "" && spec.CloudInitConfig == nil {
-		return "", nil
+		return "", nil, nil
 	}
 
 	// Create temporary directory for cloud-init files
 	tmpDir, err := os.MkdirTemp("", fmt.Sprintf("cloud-init-%s-", vmID))
 	if err != nil {
-		return "", fmt.Errorf("failed to create temp directory: %w", err)
+		return "", nil, fmt.Errorf("failed to create temp directory: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Create meta-data
+	// Build meta-data, preserving user payload when provided.
 	metaData := fmt.Sprintf(`{
   "instance-id": "%s",
   "hostname": "%s",
   "local-ipv4": "127.0.0.1"
 }`, vmID, spec.Name)
+	if spec.CloudInitConfig != nil && strings.TrimSpace(spec.CloudInitConfig.MetaData) != "" {
+		metaData = spec.CloudInitConfig.MetaData
+	}
+	if err := validateCloudInitField("meta-data", metaData); err != nil {
+		return "", nil, err
+	}
 
 	metaDataPath := filepath.Join(tmpDir, "meta-data")
 	if err := os.WriteFile(metaDataPath, []byte(metaData), 0644); err != nil {
-		return "", fmt.Errorf("failed to write meta-data: %w", err)
+		return "", nil, fmt.Errorf("failed to write meta-data: %w", err)
 	}
 
 	// Create user-data
@@ -498,10 +688,49 @@ func (v *VMRuntime) createCloudInitISO(vmID string, spec *models.VMSpec) (string
 	} else {
 		userData = "#!/bin/bash\necho 'Cloud-init configured'\n"
 	}
+	if err := validateCloudInitField("user-data", userData); err != nil {
+		return "", nil, err
+	}
 
 	userDataPath := filepath.Join(tmpDir, "user-data")
 	if err := os.WriteFile(userDataPath, []byte(userData), 0644); err != nil {
-		return "", fmt.Errorf("failed to write user-data: %w", err)
+		return "", nil, fmt.Errorf("failed to write user-data: %w", err)
+	}
+
+	paths := map[string]string{
+		"user-data": userDataPath,
+		"meta-data": metaDataPath,
+	}
+
+	networkConfig := ""
+	if spec.CloudInitConfig != nil && strings.TrimSpace(spec.CloudInitConfig.NetworkConfig) != "" {
+		networkConfig = spec.CloudInitConfig.NetworkConfig
+		if err := validateCloudInitField("network-config", networkConfig); err != nil {
+			return "", nil, err
+		}
+		networkPath := filepath.Join(tmpDir, "network-config")
+		if err := os.WriteFile(networkPath, []byte(networkConfig), 0644); err != nil {
+			return "", nil, fmt.Errorf("failed to write network-config: %w", err)
+		}
+		paths["network-config"] = networkPath
+	}
+
+	vendorData := ""
+	if spec.CloudInitConfig != nil && strings.TrimSpace(spec.CloudInitConfig.VendorData) != "" {
+		vendorData = spec.CloudInitConfig.VendorData
+		if err := validateCloudInitField("vendor-data", vendorData); err != nil {
+			return "", nil, err
+		}
+		vendorPath := filepath.Join(tmpDir, "vendor-data")
+		if err := os.WriteFile(vendorPath, []byte(vendorData), 0644); err != nil {
+			return "", nil, fmt.Errorf("failed to write vendor-data: %w", err)
+		}
+		paths["vendor-data"] = vendorPath
+	}
+
+	totalSize := len(userData) + len(metaData) + len(networkConfig) + len(vendorData)
+	if totalSize > maxCloudInitPayloadBytes {
+		return "", nil, cloudInitInvalidError("payload size %d bytes exceeds limit %d bytes", totalSize, maxCloudInitPayloadBytes)
 	}
 
 	// Generate ISO filename in a standard location
@@ -513,30 +742,162 @@ func (v *VMRuntime) createCloudInitISO(vmID string, spec *models.VMSpec) (string
 	isoPath := filepath.Join(isoDir, fmt.Sprintf("%s-cloud-init.iso", vmID))
 
 	// Create ISO using mkisofs or genisoimage
-	cmd := exec.Command(
-		"mkisofs",
+	fileKeys := make([]string, 0, len(paths))
+	for key := range paths {
+		fileKeys = append(fileKeys, key)
+	}
+	sort.Strings(fileKeys)
+
+	mkisofsArgs := []string{
 		"-output", isoPath,
 		"-volid", "cidata",
 		"-joliet",
 		"-rock",
 		"-file-mode", "0644",
 		"-dir-mode", "0755",
-		userDataPath,
-		metaDataPath,
-	)
+		"-graft-points",
+	}
+	for _, key := range fileKeys {
+		mkisofsArgs = append(mkisofsArgs, fmt.Sprintf("%s=%s", key, paths[key]))
+	}
+	cmd := exec.Command("mkisofs", mkisofsArgs...)
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		v.logger.Errorf("mkisofs output: %s", string(output))
-		return "", fmt.Errorf("failed to create cloud-init ISO: %w", err)
+		return "", nil, fmt.Errorf("failed to create cloud-init ISO: %w", err)
 	}
 
-	v.logger.Infof("Created cloud-init ISO: %s", isoPath)
-	return isoPath, nil
+	checksum := cloudInitSeedChecksum(fileKeys, map[string]string{
+		"user-data":      userData,
+		"meta-data":      metaData,
+		"network-config": networkConfig,
+		"vendor-data":    vendorData,
+	})
+	v.logger.WithFields(logrus.Fields{
+		"vm_id":           vmID,
+		"seed_path":       isoPath,
+		"seed_checksum":   checksum,
+		"seed_size_bytes": totalSize,
+		"seed_files":      strings.Join(fileKeys, ","),
+	}).Info("Created cloud-init seed ISO")
+
+	return isoPath, &cloudInitSeedInfo{
+		Path:       isoPath,
+		Checksum:   checksum,
+		SizeBytes:  totalSize,
+		PreparedAt: time.Now().UTC(),
+	}, nil
+}
+
+func validateCloudInitField(name, value string) error {
+	if len(value) > maxCloudInitPayloadBytes {
+		return cloudInitInvalidError("%s size %d bytes exceeds limit %d bytes", name, len(value), maxCloudInitPayloadBytes)
+	}
+	if strings.ContainsRune(value, '\x00') {
+		return cloudInitInvalidError("%s contains null byte", name)
+	}
+	return nil
+}
+
+func cloudInitInvalidError(format string, args ...interface{}) error {
+	return fmt.Errorf("cloud-init-invalid: %s", fmt.Sprintf(format, args...))
+}
+
+func cloudInitSeedChecksum(sortedKeys []string, payload map[string]string) string {
+	hasher := sha256.New()
+	for _, key := range sortedKeys {
+		value := payload[key]
+		if value == "" {
+			continue
+		}
+		_, _ = hasher.Write([]byte(key))
+		_, _ = hasher.Write([]byte{0})
+		_, _ = hasher.Write([]byte(value))
+		_, _ = hasher.Write([]byte{'\n'})
+	}
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+func (v *VMRuntime) setSeedInfo(vmID string, info cloudInitSeedInfo) {
+	v.seedMu.Lock()
+	v.seedInfo[vmID] = info
+	v.seedMu.Unlock()
+}
+
+func (v *VMRuntime) clearSeedInfo(vmID string) {
+	v.seedMu.Lock()
+	delete(v.seedInfo, vmID)
+	v.seedMu.Unlock()
+}
+
+func (v *VMRuntime) getSeedInfo(vmID string) (cloudInitSeedInfo, bool) {
+	v.seedMu.RLock()
+	info, ok := v.seedInfo[vmID]
+	v.seedMu.RUnlock()
+	return info, ok
 }
 
 func managedDiskMarkerPath(diskPath string) string {
 	return diskPath + managedDiskMarkerSuffix
+}
+
+func isNetworkDiskPath(path string) bool {
+	_, ok := diskSourceFromPath(path)
+	return ok
+}
+
+func diskSourceFromPath(path string) (DiskSource, bool) {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return DiskSource{}, false
+	}
+
+	if strings.HasPrefix(trimmed, "rbd:") {
+		name := strings.TrimSpace(strings.TrimPrefix(trimmed, "rbd:"))
+		if name == "" {
+			return DiskSource{}, false
+		}
+		return DiskSource{
+			Protocol: "rbd",
+			Name:     name,
+		}, true
+	}
+
+	if strings.HasPrefix(trimmed, "nfs://") {
+		parsed, err := neturl.Parse(trimmed)
+		if err != nil || parsed.Host == "" || parsed.Path == "" {
+			return DiskSource{}, false
+		}
+		host := parsed.Hostname()
+		if host == "" {
+			return DiskSource{}, false
+		}
+		source := DiskSource{
+			Protocol: "nfs",
+			Name:     parsed.Path,
+			Hosts:    []DiskSourceHost{{Name: host}},
+		}
+		if port := parsed.Port(); port != "" {
+			source.Hosts[0].Port = port
+		}
+		return source, true
+	}
+
+	// Backward compatibility for existing NFS handles in "server:/export/path" form.
+	if host, export, ok := strings.Cut(trimmed, ":/"); ok {
+		host = strings.TrimSpace(host)
+		export = strings.TrimSpace(export)
+		if host != "" && export != "" {
+			return DiskSource{
+				Protocol: "nfs",
+				Name:     "/" + export,
+				Hosts:    []DiskSourceHost{{Name: host}},
+			}, true
+		}
+	}
+
+	return DiskSource{}, false
 }
 
 func expectedCloudInitISOPaths(vmID string) []string {
@@ -691,7 +1052,16 @@ type DiskDriver struct {
 }
 
 type DiskSource struct {
-	File string `xml:"file,attr"`
+	File     string           `xml:"file,attr,omitempty"`
+	Protocol string           `xml:"protocol,attr,omitempty"`
+	Name     string           `xml:"name,attr,omitempty"`
+	Hosts    []DiskSourceHost `xml:"host,omitempty"`
+}
+
+type DiskSourceHost struct {
+	Name      string `xml:"name,attr,omitempty"`
+	Port      string `xml:"port,attr,omitempty"`
+	Transport string `xml:"transport,attr,omitempty"`
 }
 
 type DiskTarget struct {
@@ -789,11 +1159,18 @@ func (v *VMRuntime) generateDomainXML(name string, spec *models.VMSpec) (string,
 			bus = "sata"
 		}
 
+		diskType := "file"
+		source := DiskSource{File: diskCfg.Path}
+		if networkSource, ok := diskSourceFromPath(diskCfg.Path); ok {
+			diskType = "network"
+			source = networkSource
+		}
+
 		disk := Disk{
-			Type:   "file",
+			Type:   diskType,
 			Device: device,
 			Driver: DiskDriver{Name: "qemu", Type: diskCfg.Format},
-			Source: DiskSource{File: diskCfg.Path},
+			Source: source,
 			Target: DiskTarget{Dev: diskCfg.Device, Bus: bus},
 		}
 
