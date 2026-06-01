@@ -8,6 +8,8 @@ DOCKER_IMAGE=persys/compute-agent
 PROTO_DIR=api/proto
 PKG_DIR=pkg/api/v1
 CONTROL_PKG_DIR=pkg/control/v1
+SHARED_PKG_DIR=../pkg/agent/api/v1
+SHARED_CONTROL_PKG_DIR=../pkg/agent/control/v1
 PROTOC_SYSTEM_INCLUDE?=/usr/include
 
 # Go parameters
@@ -30,11 +32,19 @@ proto:
 	@echo "==> Generating protobuf code..."
 	@mkdir -p $(PKG_DIR)
 	@mkdir -p $(CONTROL_PKG_DIR)
+	@mkdir -p $(SHARED_PKG_DIR)
+	@mkdir -p $(SHARED_CONTROL_PKG_DIR)
 	cd api/proto && protoc -I. -I../../$(PROTO_DIR) -I$(PROTOC_SYSTEM_INCLUDE) --go_out=../../$(PKG_DIR) --go_opt=paths=source_relative \
 		--go-grpc_out=../../$(PKG_DIR) --go-grpc_opt=paths=source_relative \
 		agent.proto
 	cd api/proto && protoc -I. -I../../$(PROTO_DIR) -I$(PROTOC_SYSTEM_INCLUDE) --go_out=../../$(CONTROL_PKG_DIR) --go_opt=paths=source_relative \
 		--go-grpc_out=../../$(CONTROL_PKG_DIR) --go-grpc_opt=paths=source_relative \
+		control.proto
+	cd api/proto && protoc -I. -I../../$(PROTO_DIR) -I$(PROTOC_SYSTEM_INCLUDE) --go_out=../../$(SHARED_PKG_DIR) --go_opt=paths=source_relative \
+		--go-grpc_out=../../$(SHARED_PKG_DIR) --go-grpc_opt=paths=source_relative \
+		agent.proto
+	cd api/proto && protoc -I. -I../../$(PROTO_DIR) -I$(PROTOC_SYSTEM_INCLUDE) --go_out=../../$(SHARED_CONTROL_PKG_DIR) --go_opt=paths=source_relative \
+		--go-grpc_out=../../$(SHARED_CONTROL_PKG_DIR) --go-grpc_opt=paths=source_relative \
 		control.proto
 
 build:

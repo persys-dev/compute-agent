@@ -13,17 +13,21 @@ import (
 	"sync"
 	"time"
 
-	"github.com/persys/compute-agent/internal/config"
-	"github.com/persys/compute-agent/internal/metrics"
-	"github.com/persys/compute-agent/internal/resources"
-	"github.com/persys/compute-agent/internal/runtime"
-	"github.com/persys/compute-agent/internal/task"
-	"github.com/persys/compute-agent/internal/workload"
-	pb "github.com/persys/compute-agent/pkg/api/v1"
-	"github.com/persys/compute-agent/pkg/models"
+	"github.com/persys-dev/compute-agent/internal/config"
+	"github.com/persys-dev/compute-agent/internal/metrics"
+	"github.com/persys-dev/compute-agent/internal/resources"
+	"github.com/persys-dev/compute-agent/internal/runtime"
+	"github.com/persys-dev/compute-agent/internal/task"
+	"github.com/persys-dev/compute-agent/internal/workload"
+	pb "github.com/persys-dev/compute-agent/pkg/api/v1"
+	"github.com/persys-dev/compute-agent/pkg/models"
 	"github.com/sirupsen/logrus"
+	"go.opentelemetry.io/otel"
+	otelcodes "go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 )
 
@@ -51,6 +55,7 @@ func NewServer(cfg *config.Config, manager *workload.Manager, runtimeMgr *runtim
 	}
 
 	var opts []grpc.ServerOption
+	opts = append(opts, grpc.UnaryInterceptor(otelUnaryServerInterceptor("compute-agent")))
 
 	// Configure mTLS if enabled
 	if cfg.TLSEnabled {
@@ -97,6 +102,49 @@ func (s *Server) Start() error {
 
 	s.logger.Infof("Starting gRPC server on %s", addr)
 	return s.grpcServer.Serve(listener)
+}
+
+func otelUnaryServerInterceptor(service string) grpc.UnaryServerInterceptor {
+	tr := otel.Tracer(service)
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		md, _ := metadata.FromIncomingContext(ctx)
+		if md != nil {
+			ctx = otel.GetTextMapPropagator().Extract(ctx, metadataCarrier(md))
+		}
+		ctx, span := tr.Start(ctx, info.FullMethod, trace.WithSpanKind(trace.SpanKindServer))
+		defer span.End()
+
+		resp, err := handler(ctx, req)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(otelcodes.Error, err.Error())
+		}
+		return resp, err
+	}
+}
+
+type metadataCarrier metadata.MD
+
+func (m metadataCarrier) Get(key string) string {
+	values := metadata.MD(m).Get(key)
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}
+
+func (m metadataCarrier) Set(key string, value string) {
+	md := metadata.MD(m)
+	md.Set(strings.ToLower(key), value)
+}
+
+func (m metadataCarrier) Keys() []string {
+	md := metadata.MD(m)
+	keys := make([]string, 0, len(md))
+	for k := range md {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // Stop gracefully stops the gRPC server
@@ -315,15 +363,34 @@ func (s *Server) GetWorkloadStatus(ctx context.Context, req *pb.GetWorkloadStatu
 	s.logClientInfo(ctx, "GetWorkloadStatus", req.Id)
 
 	status, err := s.manager.GetStatus(ctx, req.Id)
+	pending := s.pendingStatusFromTasks(req.Id)
 	if err != nil {
-		if pending := s.pendingStatusFromTasks(req.Id); pending != nil {
+		if pending != nil {
 			return &pb.GetWorkloadStatusResponse{Status: pending}, nil
 		}
 		return nil, err
 	}
 
+	respStatus := s.statusToProto(status)
+	// Surface in-flight apply/delete task state even when a persisted status exists.
+	// Without this, callers can see stale "stopped/running" and repeatedly enqueue apply.
+	if pending != nil {
+		taskState := strings.ToLower(strings.TrimSpace(pending.GetMetadata()["task_status"]))
+		if taskState == string(task.TaskStatusPending) || taskState == string(task.TaskStatusRunning) {
+			if respStatus.Metadata == nil {
+				respStatus.Metadata = map[string]string{}
+			}
+			for k, v := range pending.GetMetadata() {
+				respStatus.Metadata[k] = v
+			}
+			respStatus.ActualState = pb.ActualState_ACTUAL_STATE_PENDING
+			respStatus.Message = pending.GetMessage()
+			respStatus.UpdatedAt = time.Now().Unix()
+		}
+	}
+
 	return &pb.GetWorkloadStatusResponse{
-		Status: s.statusToProto(status),
+		Status: respStatus,
 	}, nil
 }
 
@@ -596,6 +663,44 @@ func (s *Server) statusToProto(status *models.WorkloadStatus) *pb.WorkloadStatus
 		CreatedAt:    status.CreatedAt.Unix(),
 		UpdatedAt:    status.UpdatedAt.Unix(),
 		Metadata:     status.Metadata,
+		Usage:        statusUsageToProto(status),
+	}
+}
+
+func statusUsageToProto(status *models.WorkloadStatus) *pb.WorkloadUsageSnapshot {
+	if status == nil || status.Usage == nil {
+		return nil
+	}
+
+	collectedAt := status.Usage.CollectedAt.Unix()
+	if collectedAt < 0 {
+		collectedAt = 0
+	}
+
+	return &pb.WorkloadUsageSnapshot{
+		WorkloadId:     status.Usage.WorkloadID,
+		Type:           sWorkloadType(status.Usage.Type),
+		CpuPercent:     status.Usage.CPUPercent,
+		MemoryBytes:    status.Usage.MemoryBytes,
+		DiskReadBytes:  status.Usage.DiskReadBytes,
+		DiskWriteBytes: status.Usage.DiskWriteBytes,
+		NetRxBytes:     status.Usage.NetRXBytes,
+		NetTxBytes:     status.Usage.NetTXBytes,
+		CollectedAt:    collectedAt,
+		Source:         status.Usage.Source,
+	}
+}
+
+func sWorkloadType(t string) pb.WorkloadType {
+	switch strings.ToLower(strings.TrimSpace(t)) {
+	case "container":
+		return pb.WorkloadType_WORKLOAD_TYPE_CONTAINER
+	case "compose":
+		return pb.WorkloadType_WORKLOAD_TYPE_COMPOSE
+	case "vm":
+		return pb.WorkloadType_WORKLOAD_TYPE_VM
+	default:
+		return pb.WorkloadType_WORKLOAD_TYPE_UNSPECIFIED
 	}
 }
 

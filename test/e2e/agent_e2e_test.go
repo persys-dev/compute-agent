@@ -6,13 +6,13 @@ import (
 	"path/filepath"
 	"testing"
 
-	cfg "github.com/persys/compute-agent/internal/config"
-	agentgrpc "github.com/persys/compute-agent/internal/grpc"
-	"github.com/persys/compute-agent/internal/runtime"
-	"github.com/persys/compute-agent/internal/state"
-	"github.com/persys/compute-agent/internal/workload"
-	pb "github.com/persys/compute-agent/pkg/api/v1"
-	"github.com/persys/compute-agent/pkg/models"
+	cfg "github.com/persys-dev/compute-agent/internal/config"
+	agentgrpc "github.com/persys-dev/compute-agent/internal/grpc"
+	"github.com/persys-dev/compute-agent/internal/runtime"
+	"github.com/persys-dev/compute-agent/internal/state"
+	"github.com/persys-dev/compute-agent/internal/workload"
+	pb "github.com/persys-dev/compute-agent/pkg/api/v1"
+	"github.com/persys-dev/compute-agent/pkg/models"
 	"github.com/sirupsen/logrus"
 )
 

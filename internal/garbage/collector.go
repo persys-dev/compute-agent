@@ -4,10 +4,10 @@ import (
 	"context"
 	"time"
 
-	"github.com/persys/compute-agent/internal/metrics"
-	"github.com/persys/compute-agent/internal/runtime"
-	"github.com/persys/compute-agent/internal/state"
-	"github.com/persys/compute-agent/pkg/models"
+	"github.com/persys-dev/compute-agent/internal/metrics"
+	"github.com/persys-dev/compute-agent/internal/runtime"
+	"github.com/persys-dev/compute-agent/internal/state"
+	"github.com/persys-dev/compute-agent/pkg/models"
 	"github.com/sirupsen/logrus"
 )
 

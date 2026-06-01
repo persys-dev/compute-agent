@@ -8,9 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
-	"github.com/persys/compute-agent/pkg/models"
+	"github.com/persys-dev/compute-agent/pkg/models"
 	"github.com/sirupsen/logrus"
 )
 
@@ -59,10 +60,13 @@ func (c *ComposeRuntime) Create(ctx context.Context, workload *models.Workload) 
 		return fmt.Errorf("failed to parse compose spec: %w", err)
 	}
 
-	// Decode the compose YAML
-	composeYAML, err := base64.StdEncoding.DecodeString(spec.ComposeYAML)
+	// Accept both base64-encoded and inline YAML compose payloads.
+	composeYAML, payloadType, err := decodeComposeYAMLPayload(spec.ComposeYAML)
 	if err != nil {
-		return fmt.Errorf("failed to decode compose yaml: %w", err)
+		return fmt.Errorf("failed to parse compose yaml payload: %w", err)
+	}
+	if payloadType == "inline" {
+		c.logger.Infof("Compose payload for %s is inline YAML; skipping base64 decode", workload.ID)
 	}
 
 	// Create project directory
@@ -149,41 +153,42 @@ func (c *ComposeRuntime) Status(ctx context.Context, id string) (models.ActualSt
 		return models.ActualStateUnknown, "project not found", nil
 	}
 
-	// Get project status
-	cmd := c.buildCommand(ctx, "-p", id, "ps", "-q")
-	cmd.Dir = projectDir
-
-	output, err := cmd.CombinedOutput()
+	// Query compose directly, reading stdout only so stderr warnings don't corrupt parsing.
+	allIDs, err := c.composeContainerIDs(ctx, projectDir, id, "ps", "-q", "--all")
 	if err != nil {
-		return models.ActualStateUnknown, "", fmt.Errorf("failed to get compose status: %w", err)
-	}
-
-	// Count running containers
-	containerIDs := strings.Split(strings.TrimSpace(string(output)), "\n")
-	runningCount := 0
-
-	for _, containerID := range containerIDs {
-		if containerID == "" {
-			continue
-		}
-
-		// Check if container is running
-		inspectCmd := exec.CommandContext(ctx, "docker", "inspect", "-f", "{{.State.Status}}", containerID)
-		inspectOutput, err := inspectCmd.CombinedOutput()
+		c.logger.Debugf("compose status query failed for %s via compose CLI, falling back to docker labels: %v", id, err)
+		allIDs, err = c.dockerContainerIDsByComposeProject(ctx, id, true)
 		if err != nil {
-			continue
+			return models.ActualStateUnknown, "", fmt.Errorf("failed to get compose container list via compose and docker fallback: %w", err)
 		}
-
-		status := strings.TrimSpace(string(inspectOutput))
-		if status == "running" {
-			runningCount++
+	}
+	runningIDs, err := c.composeContainerIDs(ctx, projectDir, id, "ps", "-q", "--status", "running")
+	if err != nil {
+		c.logger.Debugf("compose running-status query failed for %s via compose CLI, falling back to docker labels: %v", id, err)
+		runningIDs, err = c.dockerContainerIDsByComposeProject(ctx, id, false)
+		if err != nil {
+			return models.ActualStateUnknown, "", fmt.Errorf("failed to get running compose container list via compose and docker fallback: %w", err)
 		}
 	}
 
-	totalContainers := len(containerIDs)
-	if totalContainers > 0 && containerIDs[0] == "" {
-		totalContainers = 0
+	// Compose CLI can occasionally return an empty set during project metadata drift;
+	// fallback to Docker labels to avoid false Stopped when containers are actually up.
+	if len(allIDs) == 0 {
+		fallbackAll, fallbackErr := c.dockerContainerIDsByComposeProject(ctx, id, true)
+		if fallbackErr != nil {
+			c.logger.Debugf("compose empty status fallback failed for %s: %v", id, fallbackErr)
+		} else if len(fallbackAll) > 0 {
+			allIDs = fallbackAll
+			fallbackRunning, runningErr := c.dockerContainerIDsByComposeProject(ctx, id, false)
+			if runningErr != nil {
+				return models.ActualStateUnknown, "", fmt.Errorf("failed to get running compose container list from docker fallback: %w", runningErr)
+			}
+			runningIDs = fallbackRunning
+		}
 	}
+
+	totalContainers := len(allIDs)
+	runningCount := len(runningIDs)
 
 	if totalContainers == 0 {
 		return models.ActualStateStopped, "no containers", nil
@@ -255,4 +260,85 @@ func (c *ComposeRuntime) buildEnvFile(env map[string]string) string {
 		lines = append(lines, fmt.Sprintf("%s=%s", k, v))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func decodeComposeYAMLPayload(payload string) ([]byte, string, error) {
+	trimmed := strings.TrimSpace(payload)
+	if trimmed == "" {
+		return nil, "", fmt.Errorf("compose yaml payload is empty")
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(trimmed)
+	if err == nil {
+		return decoded, "base64", nil
+	}
+
+	if looksLikeInlineComposeYAML(trimmed) {
+		return []byte(trimmed), "inline", nil
+	}
+
+	return nil, "", fmt.Errorf("invalid base64 payload and does not look like inline compose yaml: %w", err)
+}
+
+func looksLikeInlineComposeYAML(payload string) bool {
+	trimmed := strings.TrimSpace(payload)
+	lower := strings.ToLower(trimmed)
+	return strings.Contains(trimmed, "\n") ||
+		strings.Contains(lower, "services:") ||
+		strings.HasPrefix(lower, "version:")
+}
+
+func (c *ComposeRuntime) composeContainerIDs(ctx context.Context, projectDir, projectName string, args ...string) ([]string, error) {
+	cmdArgs := append([]string{"-p", projectName}, args...)
+	cmd := c.buildCommand(ctx, cmdArgs...)
+	cmd.Dir = projectDir
+
+	output, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
+		}
+		return nil, err
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	ids := make([]string, 0, len(lines))
+	for _, line := range lines {
+		id := strings.TrimSpace(line)
+		if id == "" {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids, nil
+}
+
+func (c *ComposeRuntime) dockerContainerIDsByComposeProject(ctx context.Context, projectName string, all bool) ([]string, error) {
+	filter := fmt.Sprintf("label=com.docker.compose.project=%s", projectName)
+	args := []string{"ps", "-q", "--filter", filter}
+	if all {
+		args = []string{"ps", "-aq", "--filter", filter}
+	}
+
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	output, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
+		}
+		return nil, err
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	ids := make([]string, 0, len(lines))
+	for _, line := range lines {
+		id := strings.TrimSpace(line)
+		if id == "" {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids, nil
 }

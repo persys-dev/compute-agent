@@ -57,6 +57,13 @@ type TaskSnapshot struct {
 // Handler is a function that executes a task
 type Handler func(ctx context.Context, task *Task) error
 
+// MetricsObserver captures queue/task telemetry without coupling this package
+// to a specific metrics backend.
+type MetricsObserver interface {
+	SetTaskQueueDepth(depth int)
+	ObserveTaskExecution(taskType string, duration time.Duration, failed bool)
+}
+
 // Queue manages async task execution
 type Queue struct {
 	handlers   map[TaskType]Handler
@@ -67,6 +74,7 @@ type Queue struct {
 	mu         sync.RWMutex
 	maxWorkers int
 	stopOnce   sync.Once
+	observer   MetricsObserver
 }
 
 // NewQueue creates a new task queue
@@ -91,9 +99,17 @@ func (q *Queue) RegisterHandler(taskType TaskType, handler Handler) {
 	q.handlers[taskType] = handler
 }
 
+// SetMetricsObserver attaches optional queue/task metrics emission.
+func (q *Queue) SetMetricsObserver(observer MetricsObserver) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.observer = observer
+}
+
 // Start begins processing tasks
 func (q *Queue) Start(ctx context.Context) {
 	q.logger.Infof("Starting task queue with %d workers", q.maxWorkers)
+	q.observeQueueDepth()
 
 	// Start worker goroutines
 	for i := 0; i < q.maxWorkers; i++ {
@@ -126,6 +142,7 @@ func (q *Queue) worker(ctx context.Context, id int) {
 			if task == nil {
 				return
 			}
+			q.observeQueueDepth()
 			q.executeTask(ctx, task)
 
 		case <-q.stopCh:
@@ -140,6 +157,7 @@ func (q *Queue) worker(ctx context.Context, id int) {
 
 // executeTask runs a task with its registered handler
 func (q *Queue) executeTask(ctx context.Context, task *Task) {
+	start := time.Now()
 	task.mu.Lock()
 	task.Status = TaskStatusRunning
 	task.StartedAt = time.Now()
@@ -157,6 +175,7 @@ func (q *Queue) executeTask(ctx context.Context, task *Task) {
 		task.EndedAt = time.Now()
 		task.mu.Unlock()
 		q.logger.Errorf("Task %s failed: %s", task.ID, task.Error)
+		q.observeTaskExecution(task.Type, time.Since(start), true)
 		return
 	}
 
@@ -174,6 +193,7 @@ func (q *Queue) executeTask(ctx context.Context, task *Task) {
 		q.logger.Infof("Task %s completed in %s", task.ID, time.Since(task.StartedAt))
 	}
 	task.mu.Unlock()
+	q.observeTaskExecution(task.Type, time.Since(start), err != nil)
 }
 
 // Submit enqueues a task for async execution
@@ -194,6 +214,7 @@ func (q *Queue) Submit(task *Task) error {
 	select {
 	case q.taskCh <- task:
 		q.logger.Debugf("Task %s submitted (type: %s)", task.ID, task.Type)
+		q.observeQueueDepth()
 		return nil
 	case <-q.stopCh:
 		q.mu.Lock()
@@ -205,6 +226,24 @@ func (q *Queue) Submit(task *Task) error {
 		delete(q.tasks, task.ID)
 		q.mu.Unlock()
 		return fmt.Errorf("task queue is full, try again later")
+	}
+}
+
+func (q *Queue) observeQueueDepth() {
+	q.mu.RLock()
+	obs := q.observer
+	q.mu.RUnlock()
+	if obs != nil {
+		obs.SetTaskQueueDepth(len(q.taskCh))
+	}
+}
+
+func (q *Queue) observeTaskExecution(taskType TaskType, duration time.Duration, failed bool) {
+	q.mu.RLock()
+	obs := q.observer
+	q.mu.RUnlock()
+	if obs != nil {
+		obs.ObserveTaskExecution(string(taskType), duration, failed)
 	}
 }
 

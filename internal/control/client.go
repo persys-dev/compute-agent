@@ -12,19 +12,23 @@ import (
 	"strings"
 	"time"
 
-	"github.com/persys/compute-agent/internal/config"
-	"github.com/persys/compute-agent/internal/resources"
-	"github.com/persys/compute-agent/internal/runtime"
-	"github.com/persys/compute-agent/internal/workload"
-	controlv1 "github.com/persys/compute-agent/pkg/control/v1"
-	"github.com/persys/compute-agent/pkg/models"
+	"github.com/persys-dev/compute-agent/internal/config"
+	"github.com/persys-dev/compute-agent/internal/resources"
+	"github.com/persys-dev/compute-agent/internal/runtime"
+	"github.com/persys-dev/compute-agent/internal/workload"
+	controlv1 "github.com/persys-dev/compute-agent/pkg/control/v1"
+	"github.com/persys-dev/compute-agent/pkg/models"
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/mem"
 	"github.com/sirupsen/logrus"
+	"go.opentelemetry.io/otel"
+	otelcodes "go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -215,6 +219,7 @@ func (c *Client) register(ctx context.Context, client controlv1.AgentControlClie
 func (c *Client) heartbeat(ctx context.Context, client controlv1.AgentControlClient) (*controlv1.HeartbeatResponse, error) {
 	usage := c.nodeUsage()
 	workloadStatuses := c.workloadStatuses(ctx)
+	workloadUsage := c.workloadUsage(workloadStatuses)
 
 	rpcCtx, cancel := context.WithTimeout(ctx, defaultRPCTimeout)
 	defer cancel()
@@ -223,6 +228,7 @@ func (c *Client) heartbeat(ctx context.Context, client controlv1.AgentControlCli
 		NodeId:           c.cfg.NodeID,
 		Usage:            usage,
 		WorkloadStatuses: workloadStatuses,
+		WorkloadUsage:    workloadUsage,
 		Timestamp:        timestamppb.Now(),
 	})
 }
@@ -246,7 +252,10 @@ func (c *Client) dial(ctx context.Context) (*grpc.ClientConn, controlv1.AgentCon
 
 func (c *Client) dialOptions() ([]grpc.DialOption, error) {
 	if c.cfg.SchedulerInsecure || !c.cfg.SchedulerTLSEnabled {
-		return []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}, nil
+		return []grpc.DialOption{
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithUnaryInterceptor(otelUnaryClientInterceptor("compute-agent-control")),
+		}, nil
 	}
 
 	cert, err := tls.LoadX509KeyPair(c.cfg.TLSCertPath, c.cfg.TLSKeyPath)
@@ -270,7 +279,58 @@ func (c *Client) dialOptions() ([]grpc.DialOption, error) {
 		Certificates: []tls.Certificate{cert},
 	}
 
-	return []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))}, nil
+	return []grpc.DialOption{
+		grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)),
+		grpc.WithUnaryInterceptor(otelUnaryClientInterceptor("compute-agent-control")),
+	}, nil
+}
+
+func otelUnaryClientInterceptor(service string) grpc.UnaryClientInterceptor {
+	tr := otel.Tracer(service)
+	return func(ctx context.Context, method string, req interface{}, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		ctx, span := tr.Start(ctx, method, trace.WithSpanKind(trace.SpanKindClient))
+		defer span.End()
+
+		md, ok := metadata.FromOutgoingContext(ctx)
+		if !ok {
+			md = metadata.New(nil)
+		} else {
+			md = md.Copy()
+		}
+		otel.GetTextMapPropagator().Inject(ctx, metadataCarrier(md))
+		ctx = metadata.NewOutgoingContext(ctx, md)
+
+		err := invoker(ctx, method, req, reply, cc, opts...)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(otelcodes.Error, err.Error())
+		}
+		return err
+	}
+}
+
+type metadataCarrier metadata.MD
+
+func (m metadataCarrier) Get(key string) string {
+	values := metadata.MD(m).Get(key)
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}
+
+func (m metadataCarrier) Set(key string, value string) {
+	md := metadata.MD(m)
+	md.Set(strings.ToLower(key), value)
+}
+
+func (m metadataCarrier) Keys() []string {
+	md := metadata.MD(m)
+	keys := make([]string, 0, len(md))
+	for k := range md {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 func (c *Client) nodeCapabilities() (*controlv1.NodeCapabilities, error) {
@@ -292,10 +352,11 @@ func (c *Client) nodeCapabilities() (*controlv1.NodeCapabilities, error) {
 	}
 
 	return &controlv1.NodeCapabilities{
-		CpuTotalMillicores:     int64(cpuCount * 1000),
-		MemoryTotalMb:          int64(memStats.Total / 1024 / 1024),
-		StoragePools:           storagePools,
-		SupportedWorkloadTypes: c.supportedWorkloadTypes(),
+		CpuTotalMillicores:      int64(cpuCount * 1000),
+		MemoryTotalMb:           int64(memStats.Total / 1024 / 1024),
+		StoragePools:            storagePools,
+		SupportedWorkloadTypes:  c.supportedWorkloadTypes(),
+		SupportedStorageDrivers: c.supportedStorageDrivers(),
 	}, nil
 }
 
@@ -359,9 +420,25 @@ func (c *Client) workloadStatuses(ctx context.Context) []*controlv1.WorkloadStat
 			FailureReason:  mapFailureReason(status),
 			Message:        status.Message,
 			LastTransition: timestamppb.New(nonZeroTime(status.UpdatedAt)),
+			Reason:         reasonDetail(status),
+			Usage:          usageSnapshot(status),
 		})
 	}
 
+	return out
+}
+
+func (c *Client) workloadUsage(statuses []*controlv1.WorkloadStatus) []*controlv1.WorkloadUsageSnapshot {
+	if len(statuses) == 0 {
+		return nil
+	}
+	out := make([]*controlv1.WorkloadUsageSnapshot, 0, len(statuses))
+	for _, status := range statuses {
+		if status == nil || status.GetUsage() == nil {
+			continue
+		}
+		out = append(out, status.GetUsage())
+	}
 	return out
 }
 
@@ -390,6 +467,40 @@ func (c *Client) supportedWorkloadTypes() []string {
 		}
 	}
 	return types
+}
+
+func (c *Client) supportedStorageDrivers() []string {
+	drivers := []string{"local"}
+	seen := map[string]struct{}{"local": {}}
+	if strings.TrimSpace(c.cfg.StorageNFSServer) != "" && strings.TrimSpace(c.cfg.StorageNFSExport) != "" {
+		drivers = appendUniqueDriver(drivers, seen, "nfs")
+	}
+	if strings.TrimSpace(c.cfg.StorageCephPool) != "" {
+		drivers = appendUniqueDriver(drivers, seen, "ceph-rbd")
+	}
+	for _, labelKey := range []string{"storage.nfs", "storage.ceph_rbd", "storage.ceph-rbd"} {
+		if strings.EqualFold(strings.TrimSpace(c.cfg.NodeLabels[labelKey]), "true") {
+			switch labelKey {
+			case "storage.nfs":
+				drivers = appendUniqueDriver(drivers, seen, "nfs")
+			default:
+				drivers = appendUniqueDriver(drivers, seen, "ceph-rbd")
+			}
+		}
+	}
+	return drivers
+}
+
+func appendUniqueDriver(drivers []string, seen map[string]struct{}, driver string) []string {
+	normalized := strings.ToLower(strings.TrimSpace(driver))
+	if normalized == "" {
+		return drivers
+	}
+	if _, ok := seen[normalized]; ok {
+		return drivers
+	}
+	seen[normalized] = struct{}{}
+	return append(drivers, normalized)
 }
 
 func (c *Client) agentEndpoint() string {
@@ -438,6 +549,61 @@ func mapFailureReason(status *models.WorkloadStatus) controlv1.FailureReason {
 		return controlv1.FailureReason_RUNTIME_ERROR
 	}
 	return controlv1.FailureReason_FAILURE_REASON_UNSPECIFIED
+}
+
+func reasonDetail(status *models.WorkloadStatus) *controlv1.ReasonDetail {
+	if status == nil {
+		return nil
+	}
+	code := ""
+	message := ""
+	retryable := false
+	nextRetry := time.Time{}
+	if status.Metadata != nil {
+		code = strings.TrimSpace(status.Metadata["failure_reason"])
+		message = strings.TrimSpace(status.Metadata["failure_message"])
+		retryable = strings.EqualFold(strings.TrimSpace(status.Metadata["retryable"]), "true")
+		if rawNext := strings.TrimSpace(status.Metadata["retry_next_at"]); rawNext != "" {
+			if parsed, err := time.Parse(time.RFC3339, rawNext); err == nil {
+				nextRetry = parsed
+			}
+		}
+	}
+	if code == "" && message == "" && nextRetry.IsZero() && !retryable {
+		return nil
+	}
+	reason := &controlv1.ReasonDetail{
+		Code:           code,
+		Message:        message,
+		LastTransition: timestamppb.New(nonZeroTime(status.UpdatedAt)),
+		Retryable:      retryable,
+	}
+	if !nextRetry.IsZero() {
+		reason.NextRetryAt = timestamppb.New(nextRetry.UTC())
+	}
+	return reason
+}
+
+func usageSnapshot(status *models.WorkloadStatus) *controlv1.WorkloadUsageSnapshot {
+	if status == nil || status.Usage == nil {
+		return nil
+	}
+	collected := status.Usage.CollectedAt
+	if collected.IsZero() {
+		collected = nonZeroTime(status.UpdatedAt)
+	}
+	return &controlv1.WorkloadUsageSnapshot{
+		WorkloadId:     strings.TrimSpace(status.ID),
+		Type:           strings.TrimSpace(status.Usage.Type),
+		CpuPercent:     status.Usage.CPUPercent,
+		MemoryBytes:    status.Usage.MemoryBytes,
+		DiskReadBytes:  status.Usage.DiskReadBytes,
+		DiskWriteBytes: status.Usage.DiskWriteBytes,
+		NetRxBytes:     status.Usage.NetRXBytes,
+		NetTxBytes:     status.Usage.NetTXBytes,
+		CollectedAt:    timestamppb.New(collected.UTC()),
+		Source:         strings.TrimSpace(status.Usage.Source),
+	}
 }
 
 func nonZeroTime(t time.Time) time.Time {

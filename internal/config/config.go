@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/persys/compute-agent/internal/node"
+	"github.com/persys-dev/compute-agent/internal/node"
 )
 
 // Config holds all agent configuration
@@ -15,6 +15,8 @@ type Config struct {
 	// Server configuration
 	GRPCAddr string
 	GRPCPort int
+	// Metrics endpoint configuration
+	MetricsPort int
 
 	// TLS/mTLS configuration
 	TLSEnabled  bool
@@ -47,6 +49,18 @@ type Config struct {
 	VMEnabled      bool
 	LibvirtURI     string
 
+	// Managed storage provider configuration
+	StorageLocalRoot    string
+	StorageNFSStageDir  string
+	StorageNFSServer    string
+	StorageNFSExport    string
+	StorageNFSOptions   string
+	StorageCephStageDir string
+	StorageCephCluster  string
+	StorageCephPool     string
+	StorageCephUser     string
+	StorageCephKeyring  string
+
 	// Reconciliation configuration
 	ReconcileInterval time.Duration
 	ReconcileEnabled  bool
@@ -72,8 +86,9 @@ type Config struct {
 func Load() (*Config, error) {
 	cfg := &Config{
 		// Server defaults
-		GRPCAddr: getEnv("PERSYS_GRPC_ADDR", "0.0.0.0"),
-		GRPCPort: getEnvAsInt("PERSYS_GRPC_PORT", 50051),
+		GRPCAddr:    getEnv("PERSYS_GRPC_ADDR", "0.0.0.0"),
+		GRPCPort:    getEnvAsInt("PERSYS_GRPC_PORT", 50051),
+		MetricsPort: getEnvAsInt("PERSYS_METRICS_PORT", 8089),
 
 		// TLS defaults
 		TLSEnabled:         getEnvAsBool("PERSYS_TLS_ENABLED", true),
@@ -103,6 +118,17 @@ func Load() (*Config, error) {
 		ComposeBinary:  getEnv("PERSYS_COMPOSE_BINARY", "docker compose"),
 		VMEnabled:      getEnvAsBool("PERSYS_VM_ENABLED", true),
 		LibvirtURI:     getEnv("PERSYS_LIBVIRT_URI", "qemu:///system"),
+
+		StorageLocalRoot:    getEnv("PERSYS_STORAGE_LOCAL_ROOT", "/var/lib/persys/volumes/local"),
+		StorageNFSStageDir:  getEnv("PERSYS_STORAGE_NFS_STAGE_ROOT", "/var/lib/persys/volumes/nfs"),
+		StorageNFSServer:    getEnv("PERSYS_STORAGE_NFS_SERVER", ""),
+		StorageNFSExport:    getEnv("PERSYS_STORAGE_NFS_EXPORT", ""),
+		StorageNFSOptions:   getEnv("PERSYS_STORAGE_NFS_MOUNT_OPTIONS", ""),
+		StorageCephStageDir: getEnv("PERSYS_STORAGE_CEPH_STAGE_ROOT", "/var/lib/persys/volumes/ceph-rbd"),
+		StorageCephCluster:  getEnv("PERSYS_STORAGE_CEPH_CLUSTER", ""),
+		StorageCephPool:     getEnv("PERSYS_STORAGE_CEPH_POOL", ""),
+		StorageCephUser:     getEnv("PERSYS_STORAGE_CEPH_USER", ""),
+		StorageCephKeyring:  getEnv("PERSYS_STORAGE_CEPH_KEYRING", ""),
 
 		// Reconciliation defaults
 		ReconcileInterval: getEnvAsDuration("PERSYS_RECONCILE_INTERVAL", 30*time.Second),
@@ -141,6 +167,9 @@ func Load() (*Config, error) {
 func (c *Config) Validate() error {
 	if c.GRPCPort < 1 || c.GRPCPort > 65535 {
 		return fmt.Errorf("invalid GRPC port: %d", c.GRPCPort)
+	}
+	if c.MetricsPort < 1 || c.MetricsPort > 65535 {
+		return fmt.Errorf("invalid metrics port: %d", c.MetricsPort)
 	}
 
 	if c.TLSEnabled {

@@ -5,13 +5,16 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/persys/compute-agent/pkg/models"
+	"github.com/persys-dev/compute-agent/internal/platform"
+	"github.com/persys-dev/compute-agent/pkg/models"
 	bolt "go.etcd.io/bbolt"
 )
 
 const (
-	workloadBucket = "workloads"
-	statusBucket   = "status"
+	workloadBucket   = "workloads"
+	statusBucket     = "status"
+	volumeBucket     = "volumes"
+	attachmentBucket = "attachments"
 )
 
 // Store manages persistent state using bbolt
@@ -29,6 +32,19 @@ type Store interface {
 
 	// Utility
 	Close() error
+}
+
+// ManagedVolumeStore provides optional persistence for provider-backed volume state.
+type ManagedVolumeStore interface {
+	SaveVolume(handle *platform.VolumeHandle) error
+	GetVolume(id string) (*platform.VolumeHandle, error)
+	DeleteVolume(id string) error
+	ListVolumes() ([]*platform.VolumeHandle, error)
+
+	SaveAttachment(attachment *platform.VolumeAttachment) error
+	GetAttachment(id string) (*platform.VolumeAttachment, error)
+	DeleteAttachment(id string) error
+	ListAttachments(workloadID string) ([]*platform.VolumeAttachment, error)
 }
 
 type boltStore struct {
@@ -50,6 +66,12 @@ func NewBoltStore(path string) (Store, error) {
 			return err
 		}
 		if _, err := tx.CreateBucketIfNotExists([]byte(statusBucket)); err != nil {
+			return err
+		}
+		if _, err := tx.CreateBucketIfNotExists([]byte(volumeBucket)); err != nil {
+			return err
+		}
+		if _, err := tx.CreateBucketIfNotExists([]byte(attachmentBucket)); err != nil {
 			return err
 		}
 		return nil
@@ -106,12 +128,39 @@ func (s *boltStore) DeleteWorkload(id string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		workloadBucket := tx.Bucket([]byte(workloadBucket))
 		statusBucket := tx.Bucket([]byte(statusBucket))
+		attachmentBucket := tx.Bucket([]byte(attachmentBucket))
 
 		// Delete both workload and status
 		if err := workloadBucket.Delete([]byte(id)); err != nil {
 			return err
 		}
-		return statusBucket.Delete([]byte(id))
+		if err := statusBucket.Delete([]byte(id)); err != nil {
+			return err
+		}
+		if attachmentBucket == nil {
+			return nil
+		}
+		keysToDelete := make([][]byte, 0)
+		if err := attachmentBucket.ForEach(func(k, v []byte) error {
+			var attachment platform.VolumeAttachment
+			if err := json.Unmarshal(v, &attachment); err != nil {
+				return nil
+			}
+			if attachment.WorkloadID == id {
+				keyCopy := make([]byte, len(k))
+				copy(keyCopy, k)
+				keysToDelete = append(keysToDelete, keyCopy)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, key := range keysToDelete {
+			if err := attachmentBucket.Delete(key); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 

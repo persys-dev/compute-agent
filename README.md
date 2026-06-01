@@ -5,6 +5,7 @@ The Persys Compute Agent is a production-grade node-level execution engine for t
 ## Features
 
 - **Multi-Runtime Support**: Docker containers, Docker Compose, and KVM/libvirt VMs
+- **Managed Volumes**: NFS and Ceph-RBD storage provisioning with automatic lifecycle management
 - **Idempotent Operations**: Revision-based tracking prevents duplicate work
 - **Secure Communication**: gRPC with mutual TLS authentication
 - **Persistent State**: bbolt-backed state store for crash recovery
@@ -95,6 +96,7 @@ The agent is configured via environment variables:
 |----------|---------|-------------|
 | `PERSYS_GRPC_ADDR` | `0.0.0.0` | gRPC bind address |
 | `PERSYS_GRPC_PORT` | `50051` | gRPC port |
+| `PERSYS_METRICS_PORT` | `8089` | Prometheus metrics port |
 
 ### TLS/mTLS Configuration
 
@@ -149,6 +151,49 @@ the agent falls back to manual certificates on disk.
 |----------|---------|-------------|
 | `PERSYS_RECONCILE_ENABLED` | `true` | Enable reconciliation loop |
 | `PERSYS_RECONCILE_INTERVAL` | `30s` | Reconciliation interval |
+
+## Retry and Backoff Strategy
+
+The compute agent uses backoff/recovery at three levels:
+
+### 1) Scheduler control-plane reconnect backoff
+
+When node registration/heartbeat connection to scheduler fails:
+
+- starts at `1s`
+- doubles on each failure
+- capped at `30s`
+- resets to `1s` after a successful registration.
+
+### 2) Local reconcile start retry backoff
+
+When desired state is `Running` but runtime start fails during reconcile:
+
+- retry policy defaults:
+  - `MaxAttempts=3`
+  - `InitialDelay=5s`
+  - `BackoffMultiplier=2`
+  - `MaxDelay=2m`
+  - only transient failures are retried automatically
+- next retry delays follow exponential backoff (`5s`, `10s`, `20s` with default attempts).
+- status metadata includes:
+  - `retry_attempts`
+  - `next_retry_time`
+  - `failure_reason`
+  - `last_error`
+
+### 3) Pending-state recovery timeout
+
+If a workload remains `pending` too long, the agent runs recovery:
+
+- pending threshold: `5m`
+- recovery action: stop + restart attempt
+- if restart fails: delete from runtime and mark workload status `failed`
+- agent then sets workload desired state to `Stopped` locally to avoid repeated restart loops on that node.
+- status metadata includes:
+  - `pending_recovery_action`
+  - `pending_recovery_reason`
+  - `pending_recovery_deleted`
 
 ### Logging Configuration
 

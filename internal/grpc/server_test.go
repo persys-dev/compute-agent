@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/persys/compute-agent/internal/task"
-	pb "github.com/persys/compute-agent/pkg/api/v1"
-	"github.com/persys/compute-agent/pkg/models"
+	"github.com/persys-dev/compute-agent/internal/task"
+	pb "github.com/persys-dev/compute-agent/pkg/api/v1"
+	"github.com/persys-dev/compute-agent/pkg/models"
 	"github.com/sirupsen/logrus"
 )
 

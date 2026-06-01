@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	pb "github.com/persys/compute-agent/pkg/api/v1"
+	pb "github.com/persys-dev/compute-agent/pkg/api/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )

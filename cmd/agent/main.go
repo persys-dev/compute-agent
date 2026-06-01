@@ -7,20 +7,24 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
-	"github.com/persys/compute-agent/internal/certmanager"
-	"github.com/persys/compute-agent/internal/config"
-	"github.com/persys/compute-agent/internal/control"
-	"github.com/persys/compute-agent/internal/garbage"
-	"github.com/persys/compute-agent/internal/grpc"
-	"github.com/persys/compute-agent/internal/metrics"
-	"github.com/persys/compute-agent/internal/reconcile"
-	"github.com/persys/compute-agent/internal/resources"
-	"github.com/persys/compute-agent/internal/runtime"
-	"github.com/persys/compute-agent/internal/state"
-	"github.com/persys/compute-agent/internal/task"
-	"github.com/persys/compute-agent/internal/workload"
-	"github.com/persys/compute-agent/pkg/models"
+	"github.com/persys-dev/compute-agent/internal/certmanager"
+	"github.com/persys-dev/compute-agent/internal/config"
+	"github.com/persys-dev/compute-agent/internal/control"
+	"github.com/persys-dev/compute-agent/internal/garbage"
+	"github.com/persys-dev/compute-agent/internal/grpc"
+	"github.com/persys-dev/compute-agent/internal/metrics"
+	"github.com/persys-dev/compute-agent/internal/platform"
+	"github.com/persys-dev/compute-agent/internal/reconcile"
+	"github.com/persys-dev/compute-agent/internal/resources"
+	"github.com/persys-dev/compute-agent/internal/runtime"
+	"github.com/persys-dev/compute-agent/internal/state"
+	"github.com/persys-dev/compute-agent/internal/storage/providers"
+	"github.com/persys-dev/compute-agent/internal/task"
+	"github.com/persys-dev/compute-agent/internal/telemetry"
+	"github.com/persys-dev/compute-agent/internal/workload"
+	"github.com/persys-dev/compute-agent/pkg/models"
 	"github.com/sirupsen/logrus"
 )
 
@@ -52,6 +56,11 @@ func main() {
 
 	logger.Infof("Starting Persys Compute Agent v%s", version)
 	logger.Infof("Node ID: %s", cfg.NodeID)
+
+	otelShutdown, err := telemetry.Setup(context.Background(), logger, "compute-agent")
+	if err != nil {
+		logger.Fatalf("Failed to initialize OpenTelemetry: %v", err)
+	}
 
 	// Initialize certificate manager before starting TLS endpoints.
 	var certManagerCancel context.CancelFunc
@@ -113,6 +122,24 @@ func main() {
 	logger.Info("Initializing workload manager...")
 	workloadMgr := workload.NewManager(store, runtimeMgr, logger)
 
+	// Initialize storage provider registry for managed volumes.
+	providerRegistry := platform.NewProviderRegistry()
+	providerRegistry.RegisterStorageProvider(providers.NewLocalProvider(cfg.StorageLocalRoot))
+	providerRegistry.RegisterStorageProvider(providers.NewNFSProvider(
+		cfg.StorageNFSServer,
+		cfg.StorageNFSExport,
+		cfg.StorageNFSStageDir,
+		cfg.StorageNFSOptions,
+	))
+	providerRegistry.RegisterStorageProvider(providers.NewCephRBDProvider(
+		cfg.StorageCephCluster,
+		cfg.StorageCephPool,
+		cfg.StorageCephUser,
+		cfg.StorageCephKeyring,
+		cfg.StorageCephStageDir,
+	))
+	workloadMgr.SetVolumeManager(platform.NewDefaultVolumeManager(providerRegistry))
+
 	// Initialize metrics (Issue 7)
 	logger.Info("Initializing metrics...")
 	metricsInst, err := metrics.NewMetrics(logger)
@@ -125,7 +152,7 @@ func main() {
 	// Start metrics server
 	var metricsServer *metrics.Server
 	if metricsInst != nil {
-		metricsServer = metrics.NewServer(":8080", logger, metricsInst)
+		metricsServer = metrics.NewServer(fmt.Sprintf(":%d", cfg.MetricsPort), logger, metricsInst)
 		if err := metricsServer.Start(); err != nil {
 			logger.Warnf("Failed to start metrics server: %v", err)
 			// Continue anyway, metrics is not critical
@@ -169,6 +196,9 @@ func main() {
 	// Initialize async task queue
 	logger.Info("Initializing async task queue...")
 	taskQueue := task.NewQueue(10, logger) // 10 workers for async operations
+	if metricsInst != nil {
+		taskQueue.SetMetricsObserver(metricsInst)
+	}
 
 	// Register task handlers
 	taskQueue.RegisterHandler(task.TaskTypeApplyWorkload, func(ctx context.Context, t *task.Task) error {
@@ -271,6 +301,11 @@ func main() {
 		if err := metricsServer.Stop(); err != nil {
 			logger.Warnf("Error stopping metrics server: %v", err)
 		}
+	}
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	if err := otelShutdown(shutdownCtx); err != nil {
+		logger.Warnf("Error stopping OpenTelemetry: %v", err)
 	}
 
 	logger.Info("Shutdown complete")
