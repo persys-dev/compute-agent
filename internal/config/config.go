@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
+	"runtime"
 	"strings"
 	"time"
 
@@ -101,11 +101,18 @@ func Load() (*Config, error) {
 	v.SetConfigType("yaml")
 	v.SetEnvPrefix("PERSYS")
 	v.AutomaticEnv()
+	v.BindEnv("state_store_path", "PERSYS_STATE_PATH", "PERSYS_STATE_STORE_PATH")
+	v.BindEnv("node_labels")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
+
+	// Handle PERSYS_NODE_LABELS environment variable (comma-separated)
+	if labelsEnv := os.Getenv("PERSYS_NODE_LABELS"); labelsEnv != "" {
+		v.Set("node_labels", parseLabelsEnv(labelsEnv))
+	}
 
 	// Bind CLI flags
 	fs.String("config", "", "Path to config file")
-	fs.Parse(os.Args[1:]) // Parse early
+	fs.Parse(os.Args[1:]) // Parse early (ContinueOnError)
 
 	if cfgFile := fs.Lookup("config").Value.String(); cfgFile != "" {
 		v.SetConfigFile(cfgFile)
@@ -123,7 +130,7 @@ func Load() (*Config, error) {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
 			return nil, fmt.Errorf("config file error: %w", err)
 		}
-		fmt.Println("No config file found → using defaults + ENV + flags")
+		// fmt.Println("No config file found → using defaults + ENV + flags")
 	}
 
 	// Unmarshal
@@ -132,12 +139,18 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
 
-	// Post processing (same as before)
+	// Post-processing
 	cfg.SchedulerTLSEnabled = !cfg.SchedulerInsecure
 
 	if cfg.NodeID == "" {
 		cfg.NodeID = generateNodeID()
 	}
+
+	// Ensure NodeLabels map exists and apply defaults + region/env
+	if cfg.NodeLabels == nil {
+		cfg.NodeLabels = make(map[string]string)
+	}
+	cfg.NodeLabels = mergeWithDefaultLabels(cfg.NodeLabels)
 	cfg.NodeLabels = parseNodeLabels(cfg.NodeRegion, cfg.NodeEnv, cfg.NodeLabels)
 
 	if err := cfg.Validate(); err != nil {
@@ -148,7 +161,7 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
-// getConfigSearchPaths - same as I gave you earlier
+// getConfigSearchPaths returns possible locations for agent_config.yaml
 func getConfigSearchPaths() []string {
 	paths := []string{"/etc/persys"}
 
@@ -204,87 +217,6 @@ func defaultConfig() *Config {
 	}
 }
 
-// overrideWithEnv overrides config with environment variables
-func overrideWithEnv(cfg *Config) {
-	if v := os.Getenv("PERSYS_GRPC_ADDR"); v != "" {
-		cfg.GRPCAddr = v
-	}
-	if v := os.Getenv("PERSYS_GRPC_PORT"); v != "" {
-		if val, err := strconv.Atoi(v); err == nil {
-			cfg.GRPCPort = val
-		}
-	}
-	if v := os.Getenv("PERSYS_METRICS_PORT"); v != "" {
-		if val, err := strconv.Atoi(v); err == nil {
-			cfg.MetricsPort = val
-		}
-	}
-	if v := os.Getenv("PERSYS_TLS_ENABLED"); v != "" {
-		cfg.TLSEnabled = parseBool(v)
-	}
-	if v := os.Getenv("PERSYS_TLS_CERT"); v != "" {
-		cfg.TLSCertPath = v
-	}
-	if v := os.Getenv("PERSYS_TLS_KEY"); v != "" {
-		cfg.TLSKeyPath = v
-	}
-	if v := os.Getenv("PERSYS_TLS_CA"); v != "" {
-		cfg.TLSCAPath = v
-	}
-	if v := os.Getenv("PERSYS_VAULT_ENABLED"); v != "" {
-		cfg.VaultEnabled = parseBool(v)
-	}
-	if v := os.Getenv("PERSYS_VAULT_ADDR"); v != "" {
-		cfg.VaultAddr = v
-	}
-	if v := os.Getenv("PERSYS_VAULT_AUTH_METHOD"); v != "" {
-		cfg.VaultAuthMethod = v
-	}
-	if v := os.Getenv("PERSYS_VAULT_TOKEN"); v != "" {
-		cfg.VaultToken = v
-	}
-	if v := os.Getenv("PERSYS_VAULT_APPROLE_ROLE_ID"); v != "" {
-		cfg.VaultAppRoleID = v
-	}
-	if v := os.Getenv("PERSYS_VAULT_APPROLE_SECRET_ID"); v != "" {
-		cfg.VaultAppSecretID = v
-	}
-	if v := os.Getenv("PERSYS_VAULT_PKI_MOUNT"); v != "" {
-		cfg.VaultPKIMount = v
-	}
-	if v := os.Getenv("PERSYS_VAULT_PKI_ROLE"); v != "" {
-		cfg.VaultPKIRole = v
-	}
-	if v := os.Getenv("PERSYS_DOCKER_ENABLED"); v != "" {
-		cfg.DockerEnabled = parseBool(v)
-	}
-	if v := os.Getenv("PERSYS_COMPOSE_ENABLED"); v != "" {
-		cfg.ComposeEnabled = parseBool(v)
-	}
-	if v := os.Getenv("PERSYS_VM_ENABLED"); v != "" {
-		cfg.VMEnabled = parseBool(v)
-	}
-	if v := os.Getenv("PERSYS_LIBVIRT_URI"); v != "" {
-		cfg.LibvirtURI = v
-	}
-	if v := os.Getenv("PERSYS_NODE_REGION"); v != "" {
-		cfg.NodeRegion = v
-	}
-	if v := os.Getenv("PERSYS_NODE_ENV"); v != "" {
-		cfg.NodeEnv = v
-	}
-	if v := os.Getenv("PERSYS_NODE_LABELS"); v != "" {
-		labels := map[string]string{}
-		for _, kv := range strings.Split(v, ",") {
-			parts := strings.SplitN(kv, "=", 2)
-			if len(parts) == 2 {
-				labels[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
-			}
-		}
-		cfg.NodeLabels = labels
-	}
-}
-
 // Validate ensures config correctness
 func (c *Config) Validate() error {
 	if c.GRPCPort < 1 || c.GRPCPort > 65535 {
@@ -333,19 +265,35 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// parseNodeLabels merges region/env with user labels
-func parseNodeLabels(region, env string, raw map[string]string) map[string]string {
-	labels := map[string]string{}
-	if region != "" {
-		labels["region"] = region
+// mergeWithDefaultLabels adds sensible default labels if they are not already set
+func mergeWithDefaultLabels(labels map[string]string) map[string]string {
+	defaults := map[string]string{
+		"os":   runtime.GOOS,
+		"arch": runtime.GOARCH,
+		// Add more useful defaults here in the future (e.g. hostname, etc.)
 	}
-	if env != "" {
-		labels["env"] = env
-	}
-	for k, v := range raw {
-		labels[k] = v
+
+	for k, v := range defaults {
+		if _, exists := labels[k]; !exists {
+			labels[k] = v
+		}
 	}
 	return labels
+}
+
+// parseNodeLabels merges region/env with user-provided labels (region/env take precedence)
+func parseNodeLabels(region, env string, raw map[string]string) map[string]string {
+	if raw == nil {
+		raw = make(map[string]string)
+	}
+
+	if region != "" {
+		raw["region"] = region
+	}
+	if env != "" {
+		raw["env"] = env
+	}
+	return raw
 }
 
 // generateNodeID creates unique node identifier
@@ -364,7 +312,24 @@ func getHostname() string {
 	return "unknown"
 }
 
-func parseBool(v string) bool {
-	b, _ := strconv.ParseBool(v)
-	return b
+// parseLabelsEnv parses comma-separated key=value pairs for PERSYS_NODE_LABELS
+func parseLabelsEnv(s string) map[string]string {
+	labels := make(map[string]string)
+	if s == "" {
+		return labels
+	}
+	for _, pair := range strings.Split(s, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		if idx := strings.Index(pair, "="); idx > 0 {
+			k := strings.TrimSpace(pair[:idx])
+			v := strings.TrimSpace(pair[idx+1:])
+			if k != "" && v != "" {
+				labels[k] = v
+			}
+		}
+	}
+	return labels
 }
