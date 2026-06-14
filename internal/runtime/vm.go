@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/digitalocean/go-libvirt"
-	"github.com/persys-dev/compute-agent/pkg/models"
+	"github.com/persys-dev/persys-cloud/compute-agent/pkg/models"
 	"github.com/sirupsen/logrus"
 )
 
@@ -650,8 +650,13 @@ func isDomainNotFoundErr(err error) bool {
 // createCloudInitISO creates a cloud-init ISO for VM configuration
 func (v *VMRuntime) createCloudInitISO(vmID string, spec *models.VMSpec) (string, *cloudInitSeedInfo, error) {
 	// Only create if cloud-init is specified
-	if spec.CloudInit == "" && spec.CloudInitConfig == nil {
+	if spec.CloudInit == "" && (spec.CloudInitConfig == nil || (spec.CloudInitConfig.UserData == "" && spec.CloudInitConfig.MetaData == "")) {
 		return "", nil, nil
+	}
+
+	// Ensure CloudInitConfig exists
+	if spec.CloudInitConfig == nil {
+		spec.CloudInitConfig = &models.CloudInitConfig{}
 	}
 
 	// Create temporary directory for cloud-init files
@@ -661,13 +666,13 @@ func (v *VMRuntime) createCloudInitISO(vmID string, spec *models.VMSpec) (string
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Build meta-data, preserving user payload when provided.
+	// --- Meta-data ---
 	metaData := fmt.Sprintf(`{
   "instance-id": "%s",
   "hostname": "%s",
   "local-ipv4": "127.0.0.1"
 }`, vmID, spec.Name)
-	if spec.CloudInitConfig != nil && strings.TrimSpace(spec.CloudInitConfig.MetaData) != "" {
+	if strings.TrimSpace(spec.CloudInitConfig.MetaData) != "" {
 		metaData = spec.CloudInitConfig.MetaData
 	}
 	if err := validateCloudInitField("meta-data", metaData); err != nil {
@@ -679,9 +684,9 @@ func (v *VMRuntime) createCloudInitISO(vmID string, spec *models.VMSpec) (string
 		return "", nil, fmt.Errorf("failed to write meta-data: %w", err)
 	}
 
-	// Create user-data
+	// --- User-data ---
 	var userData string
-	if spec.CloudInitConfig != nil && spec.CloudInitConfig.UserData != "" {
+	if spec.CloudInitConfig.UserData != "" {
 		userData = spec.CloudInitConfig.UserData
 	} else if spec.CloudInit != "" {
 		userData = spec.CloudInit
@@ -697,27 +702,33 @@ func (v *VMRuntime) createCloudInitISO(vmID string, spec *models.VMSpec) (string
 		return "", nil, fmt.Errorf("failed to write user-data: %w", err)
 	}
 
+	// --- Network config ---
+	networkConfig := strings.TrimSpace(spec.CloudInitConfig.NetworkConfig)
+	if networkConfig == "" {
+		// Provide a minimal default network config so cloud-init can configure network
+		networkConfig = `version: 2
+ethernets:
+  all:
+    dhcp4: true
+`
+	}
+	if err := validateCloudInitField("network-config", networkConfig); err != nil {
+		return "", nil, err
+	}
+
+	networkPath := filepath.Join(tmpDir, "network-config")
+	if err := os.WriteFile(networkPath, []byte(networkConfig), 0644); err != nil {
+		return "", nil, fmt.Errorf("failed to write network-config: %w", err)
+	}
+
+	// --- Vendor data (optional) ---
 	paths := map[string]string{
-		"user-data": userDataPath,
-		"meta-data": metaDataPath,
+		"user-data":      userDataPath,
+		"meta-data":      metaDataPath,
+		"network-config": networkPath,
 	}
 
-	networkConfig := ""
-	if spec.CloudInitConfig != nil && strings.TrimSpace(spec.CloudInitConfig.NetworkConfig) != "" {
-		networkConfig = spec.CloudInitConfig.NetworkConfig
-		if err := validateCloudInitField("network-config", networkConfig); err != nil {
-			return "", nil, err
-		}
-		networkPath := filepath.Join(tmpDir, "network-config")
-		if err := os.WriteFile(networkPath, []byte(networkConfig), 0644); err != nil {
-			return "", nil, fmt.Errorf("failed to write network-config: %w", err)
-		}
-		paths["network-config"] = networkPath
-	}
-
-	vendorData := ""
-	if spec.CloudInitConfig != nil && strings.TrimSpace(spec.CloudInitConfig.VendorData) != "" {
-		vendorData = spec.CloudInitConfig.VendorData
+	if vendorData := strings.TrimSpace(spec.CloudInitConfig.VendorData); vendorData != "" {
 		if err := validateCloudInitField("vendor-data", vendorData); err != nil {
 			return "", nil, err
 		}
@@ -728,12 +739,16 @@ func (v *VMRuntime) createCloudInitISO(vmID string, spec *models.VMSpec) (string
 		paths["vendor-data"] = vendorPath
 	}
 
-	totalSize := len(userData) + len(metaData) + len(networkConfig) + len(vendorData)
+	// --- Check total payload size ---
+	totalSize := len(userData) + len(metaData) + len(networkConfig) + len(spec.CloudInitConfig.VendorData)
 	if totalSize > maxCloudInitPayloadBytes {
-		return "", nil, cloudInitInvalidError("payload size %d bytes exceeds limit %d bytes", totalSize, maxCloudInitPayloadBytes)
+		return "", nil, cloudInitInvalidError(
+			"payload size %d bytes exceeds limit %d bytes",
+			totalSize, maxCloudInitPayloadBytes,
+		)
 	}
 
-	// Generate ISO filename in a standard location
+	// --- Generate ISO ---
 	isoDir := "/var/lib/libvirt/images"
 	if err := os.MkdirAll(isoDir, 0755); err != nil {
 		v.logger.Warnf("Failed to create ISO directory %s, using /tmp", isoDir)
@@ -741,7 +756,6 @@ func (v *VMRuntime) createCloudInitISO(vmID string, spec *models.VMSpec) (string
 	}
 	isoPath := filepath.Join(isoDir, fmt.Sprintf("%s-cloud-init.iso", vmID))
 
-	// Create ISO using mkisofs or genisoimage
 	fileKeys := make([]string, 0, len(paths))
 	for key := range paths {
 		fileKeys = append(fileKeys, key)
@@ -760,8 +774,8 @@ func (v *VMRuntime) createCloudInitISO(vmID string, spec *models.VMSpec) (string
 	for _, key := range fileKeys {
 		mkisofsArgs = append(mkisofsArgs, fmt.Sprintf("%s=%s", key, paths[key]))
 	}
-	cmd := exec.Command("mkisofs", mkisofsArgs...)
 
+	cmd := exec.Command("mkisofs", mkisofsArgs...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		v.logger.Errorf("mkisofs output: %s", string(output))
@@ -772,8 +786,9 @@ func (v *VMRuntime) createCloudInitISO(vmID string, spec *models.VMSpec) (string
 		"user-data":      userData,
 		"meta-data":      metaData,
 		"network-config": networkConfig,
-		"vendor-data":    vendorData,
+		"vendor-data":    spec.CloudInitConfig.VendorData,
 	})
+
 	v.logger.WithFields(logrus.Fields{
 		"vm_id":           vmID,
 		"seed_path":       isoPath,
