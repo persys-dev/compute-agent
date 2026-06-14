@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/persys-dev/compute-agent/internal/platform"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/platform"
 )
 
 const defaultNFSStageRoot = "/var/lib/persys/volumes/nfs"

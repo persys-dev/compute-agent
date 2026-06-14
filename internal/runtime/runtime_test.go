@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/persys-dev/compute-agent/pkg/models"
+	"github.com/persys-dev/persys-cloud/compute-agent/pkg/models"
 )
 
 type rtStub struct {

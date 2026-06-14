@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/persys-dev/compute-agent/internal/platform"
-	"github.com/persys-dev/compute-agent/pkg/models"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/platform"
+	"github.com/persys-dev/persys-cloud/compute-agent/pkg/models"
 	bolt "go.etcd.io/bbolt"
 )
 

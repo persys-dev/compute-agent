@@ -10,14 +10,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/persys-dev/compute-agent/internal/errors"
-	"github.com/persys-dev/compute-agent/internal/metrics"
-	"github.com/persys-dev/compute-agent/internal/platform"
-	"github.com/persys-dev/compute-agent/internal/resources"
-	"github.com/persys-dev/compute-agent/internal/retry"
-	"github.com/persys-dev/compute-agent/internal/runtime"
-	"github.com/persys-dev/compute-agent/internal/state"
-	"github.com/persys-dev/compute-agent/pkg/models"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/errors"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/metrics"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/platform"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/resources"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/retry"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/runtime"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/state"
+	"github.com/persys-dev/persys-cloud/compute-agent/pkg/models"
 	"github.com/sirupsen/logrus"
 )
 

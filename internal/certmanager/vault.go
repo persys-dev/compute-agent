@@ -15,7 +15,7 @@ import (
 	"time"
 
 	vault "github.com/hashicorp/vault/api"
-	"github.com/persys-dev/compute-agent/internal/config"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/config"
 	"github.com/sirupsen/logrus"
 )
 

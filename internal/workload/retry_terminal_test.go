@@ -3,8 +3,8 @@ package workload
 import (
 	"testing"
 
-	"github.com/persys-dev/compute-agent/internal/retry"
-	"github.com/persys-dev/compute-agent/pkg/models"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/retry"
+	"github.com/persys-dev/persys-cloud/compute-agent/pkg/models"
 )
 
 func TestMarkRetryTerminalSetsMetadata(t *testing.T) {

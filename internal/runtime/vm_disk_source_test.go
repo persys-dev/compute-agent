@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/persys-dev/compute-agent/pkg/models"
+	"github.com/persys-dev/persys-cloud/compute-agent/pkg/models"
 )
 
 func TestDiskSourceFromPath(t *testing.T) {

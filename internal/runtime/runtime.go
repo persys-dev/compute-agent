@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/persys-dev/compute-agent/pkg/models"
+	"github.com/persys-dev/persys-cloud/compute-agent/pkg/models"
 )
 
 // Runtime defines the interface for workload execution

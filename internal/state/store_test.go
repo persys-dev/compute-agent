@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/persys-dev/compute-agent/internal/platform"
-	"github.com/persys-dev/compute-agent/pkg/models"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/platform"
+	"github.com/persys-dev/persys-cloud/compute-agent/pkg/models"
 )
 
 func TestBoltStore_WorkloadAndStatusLifecycle(t *testing.T) {
