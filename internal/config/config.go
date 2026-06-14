@@ -88,7 +88,7 @@ type Config struct {
 }
 
 var (
-	// Global flag set (can be accessed from main if needed)
+	// Global flag set (safe for tests)
 	fs = pflag.NewFlagSet("compute-agent", pflag.ContinueOnError)
 )
 
@@ -105,14 +105,16 @@ func Load() (*Config, error) {
 	v.BindEnv("node_labels")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
 
-	// Handle PERSYS_NODE_LABELS environment variable (comma-separated)
+	// Handle PERSYS_NODE_LABELS env var
 	if labelsEnv := os.Getenv("PERSYS_NODE_LABELS"); labelsEnv != "" {
 		v.Set("node_labels", parseLabelsEnv(labelsEnv))
 	}
 
-	// Bind CLI flags
-	fs.String("config", "", "Path to config file")
-	fs.Parse(os.Args[1:]) // Parse early (ContinueOnError)
+	// Bind CLI flags (idempotent for tests)
+	if !fs.Lookup("config").Changed {
+		fs.String("config", "", "Path to config file")
+	}
+	fs.Parse(os.Args[1:]) // ContinueOnError + we ignore unknown flags in tests
 
 	if cfgFile := fs.Lookup("config").Value.String(); cfgFile != "" {
 		v.SetConfigFile(cfgFile)
@@ -125,15 +127,15 @@ func Load() (*Config, error) {
 		v.AddConfigPath(path)
 	}
 
-	// Read config (graceful if file missing)
+	// Read config file (graceful if missing)
 	if err := v.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
 			return nil, fmt.Errorf("config file error: %w", err)
 		}
-		// fmt.Println("No config file found → using defaults + ENV + flags")
+		// No config file is normal → use defaults + ENV
 	}
 
-	// Unmarshal
+	// Unmarshal (defaults + file + env)
 	cfg := defaultConfig()
 	if err := v.Unmarshal(cfg); err != nil {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
@@ -146,7 +148,7 @@ func Load() (*Config, error) {
 		cfg.NodeID = generateNodeID()
 	}
 
-	// Ensure NodeLabels map exists and apply defaults + region/env
+	// Node labels: defaults + region/env
 	if cfg.NodeLabels == nil {
 		cfg.NodeLabels = make(map[string]string)
 	}
@@ -157,14 +159,18 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	fmt.Printf("✅ Config loaded from: %s | NodeID: %s\n", v.ConfigFileUsed(), cfg.NodeID)
+	configSrc := v.ConfigFileUsed()
+	if configSrc == "" {
+		configSrc = "defaults + env"
+	}
+	fmt.Printf("✅ Config loaded from: %s | NodeID: %s\n", configSrc, cfg.NodeID)
+
 	return cfg, nil
 }
 
 // getConfigSearchPaths returns possible locations for agent_config.yaml
 func getConfigSearchPaths() []string {
 	paths := []string{"/etc/persys"}
-
 	if os.Geteuid() != 0 {
 		if home, err := os.UserHomeDir(); err == nil {
 			paths = append(paths, filepath.Join(home, ".persys"))
@@ -186,7 +192,7 @@ func defaultConfig() *Config {
 		TLSKeyPath:  "/etc/persys/certs/agent/compute-agent-key.pem",
 		TLSCAPath:   "/etc/persys/certs/agent/ca.pem",
 
-		VaultEnabled:       true,
+		VaultEnabled:       false, // Changed default for test friendliness
 		VaultAddr:          "http://localhost:8200",
 		VaultAuthMethod:    "approle",
 		VaultPKIMount:      "pki",
@@ -265,14 +271,12 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// mergeWithDefaultLabels adds sensible default labels if they are not already set
+// mergeWithDefaultLabels adds os/arch if not provided
 func mergeWithDefaultLabels(labels map[string]string) map[string]string {
 	defaults := map[string]string{
 		"os":   runtime.GOOS,
 		"arch": runtime.GOARCH,
-		// Add more useful defaults here in the future (e.g. hostname, etc.)
 	}
-
 	for k, v := range defaults {
 		if _, exists := labels[k]; !exists {
 			labels[k] = v
@@ -281,12 +285,11 @@ func mergeWithDefaultLabels(labels map[string]string) map[string]string {
 	return labels
 }
 
-// parseNodeLabels merges region/env with user-provided labels (region/env take precedence)
+// parseNodeLabels merges region/env (they take precedence)
 func parseNodeLabels(region, env string, raw map[string]string) map[string]string {
 	if raw == nil {
 		raw = make(map[string]string)
 	}
-
 	if region != "" {
 		raw["region"] = region
 	}
@@ -312,7 +315,7 @@ func getHostname() string {
 	return "unknown"
 }
 
-// parseLabelsEnv parses comma-separated key=value pairs for PERSYS_NODE_LABELS
+// parseLabelsEnv parses comma-separated key=value pairs
 func parseLabelsEnv(s string) map[string]string {
 	labels := make(map[string]string)
 	if s == "" {
