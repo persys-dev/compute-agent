@@ -88,7 +88,6 @@ type Config struct {
 }
 
 var (
-	// Global flag set (safe for tests)
 	fs = pflag.NewFlagSet("compute-agent", pflag.ContinueOnError)
 )
 
@@ -96,38 +95,49 @@ var (
 func Load() (*Config, error) {
 	v := viper.New()
 
-	// Setup Viper
 	v.SetConfigName("agent_config")
 	v.SetConfigType("yaml")
 	v.SetEnvPrefix("PERSYS")
 	v.AutomaticEnv()
-	v.BindEnv("state_store_path", "PERSYS_STATE_PATH", "PERSYS_STATE_STORE_PATH")
-	v.BindEnv("node_labels")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
 
-	// Handle PERSYS_NODE_LABELS (comma-separated)
+	// Explicitly bind important fields for tests
+	v.BindEnv("grpc_port")
+	v.BindEnv("state_store_path", "PERSYS_STATE_PATH", "PERSYS_STATE_STORE_PATH")
+	v.BindEnv("node_region")
+	v.BindEnv("node_env")
+	v.BindEnv("node_labels")
+	v.BindEnv("scheduler_addr")
+	v.BindEnv("scheduler_insecure")
+	v.BindEnv("docker_enabled")
+	v.BindEnv("compose_enabled")
+	v.BindEnv("vm_enabled")
+	v.BindEnv("tls_enabled")
+	v.BindEnv("vault_enabled")
+
+	// Handle PERSYS_NODE_LABELS specially
 	if labelsEnv := os.Getenv("PERSYS_NODE_LABELS"); labelsEnv != "" {
 		v.Set("node_labels", parseLabelsEnv(labelsEnv))
 	}
 
-	// Bind CLI flags (idempotent)
+	// Bind CLI flag safely
 	if fs.Lookup("config") == nil {
 		fs.String("config", "", "Path to config file")
 	}
 	fs.Parse(os.Args[1:])
 
+	// Config file handling
 	if cfgFile := fs.Lookup("config").Value.String(); cfgFile != "" {
 		v.SetConfigFile(cfgFile)
 	} else if envFile := os.Getenv("PERSYS_CONFIG_FILE"); envFile != "" {
 		v.SetConfigFile(envFile)
+	} else {
+		for _, path := range getConfigSearchPaths() {
+			v.AddConfigPath(path)
+		}
 	}
 
-	// Add search paths
-	for _, path := range getConfigSearchPaths() {
-		v.AddConfigPath(path)
-	}
-
-	// Read config file (graceful if missing)
+	// Read config file (graceful)
 	if err := v.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
 			return nil, fmt.Errorf("config file error: %w", err)
@@ -271,7 +281,7 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// mergeWithDefaultLabels adds os/arch etc. if missing
+// mergeWithDefaultLabels, parseNodeLabels, generateNodeID, parseLabelsEnv remain the same as before
 func mergeWithDefaultLabels(labels map[string]string) map[string]string {
 	defaults := map[string]string{
 		"os":   runtime.GOOS,
