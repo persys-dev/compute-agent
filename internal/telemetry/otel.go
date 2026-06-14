@@ -16,11 +16,14 @@ import (
 )
 
 // Setup initializes OpenTelemetry tracing for the compute agent.
-func Setup(ctx context.Context, logger *logrus.Logger, defaultServiceName string) (func(context.Context) error, error) {
-	endpoint := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+func Setup(ctx context.Context, logger *logrus.Logger, defaultServiceName string, endpoint string) (func(context.Context) error, error) {
+	
 	if endpoint == "" {
 		endpoint = strings.TrimSpace(os.Getenv("OTEL_EXPORTER_JAEGER_ENDPOINT"))
-	}
+	} 
+	if endpoint == "" {
+		endpoint = strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	} 
 	if endpoint == "" {
 		logger.Info("OpenTelemetry exporter disabled: endpoint not configured")
 		return func(context.Context) error { return nil }, nil
