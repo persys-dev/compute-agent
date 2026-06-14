@@ -16,7 +16,7 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
-	"github.com/persys-dev/compute-agent/pkg/models"
+	"github.com/persys-dev/persys-cloud/compute-agent/pkg/models"
 	"github.com/sirupsen/logrus"
 )
 
@@ -37,11 +37,14 @@ func NewDockerRuntime(endpoint string, logger *logrus.Logger) (*DockerRuntime, e
 	var cli *client.Client
 	var err error
 
-	if endpoint == "" || strings.HasPrefix(endpoint, "unix://") {
-		cli, err = client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
-	} else {
+	if endpoint != "" {
 		cli, err = client.NewClientWithOpts(
 			client.WithHost(endpoint),
+			client.WithAPIVersionNegotiation(),
+		)
+	} else {
+		cli, err = client.NewClientWithOpts(
+			client.FromEnv,
 			client.WithAPIVersionNegotiation(),
 		)
 	}
