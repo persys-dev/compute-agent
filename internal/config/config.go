@@ -105,16 +105,16 @@ func Load() (*Config, error) {
 	v.BindEnv("node_labels")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
 
-	// Handle PERSYS_NODE_LABELS env var
+	// Handle PERSYS_NODE_LABELS (comma-separated)
 	if labelsEnv := os.Getenv("PERSYS_NODE_LABELS"); labelsEnv != "" {
 		v.Set("node_labels", parseLabelsEnv(labelsEnv))
 	}
 
-	// Bind CLI flags (idempotent for tests)
-	if !fs.Lookup("config").Changed {
+	// Bind CLI flags (idempotent)
+	if fs.Lookup("config") == nil {
 		fs.String("config", "", "Path to config file")
 	}
-	fs.Parse(os.Args[1:]) // ContinueOnError + we ignore unknown flags in tests
+	fs.Parse(os.Args[1:])
 
 	if cfgFile := fs.Lookup("config").Value.String(); cfgFile != "" {
 		v.SetConfigFile(cfgFile)
@@ -271,7 +271,7 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// mergeWithDefaultLabels adds os/arch if not provided
+// mergeWithDefaultLabels adds os/arch etc. if missing
 func mergeWithDefaultLabels(labels map[string]string) map[string]string {
 	defaults := map[string]string{
 		"os":   runtime.GOOS,
@@ -285,7 +285,7 @@ func mergeWithDefaultLabels(labels map[string]string) map[string]string {
 	return labels
 }
 
-// parseNodeLabels merges region/env (they take precedence)
+// parseNodeLabels merges region/env (takes precedence)
 func parseNodeLabels(region, env string, raw map[string]string) map[string]string {
 	if raw == nil {
 		raw = make(map[string]string)
@@ -315,7 +315,7 @@ func getHostname() string {
 	return "unknown"
 }
 
-// parseLabelsEnv parses comma-separated key=value pairs
+// parseLabelsEnv parses comma-separated key=value pairs, skips invalid ones
 func parseLabelsEnv(s string) map[string]string {
 	labels := make(map[string]string)
 	if s == "" {
