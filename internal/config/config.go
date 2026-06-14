@@ -78,10 +78,10 @@ type Config struct {
 	NodeLabels map[string]string `mapstructure:"node_labels"`
 
 	// Scheduler control-plane configuration
-	SchedulerAddr     string `mapstructure:"scheduler_addr"`
-	SchedulerInsecure bool   `mapstructure:"scheduler_insecure"`
+	SchedulerAddr       string `mapstructure:"scheduler_addr"`
+	SchedulerInsecure   bool   `mapstructure:"scheduler_insecure"`
 	SchedulerTLSEnabled bool
-	AgentGRPCEndpoint string `mapstructure:"agent_grpc_endpoint"`
+	AgentGRPCEndpoint   string `mapstructure:"agent_grpc_endpoint"`
 
 	// OpenTelemetry configuration
 	OTELExporterEndpoint string `mapstructure:"otlp_endpoint"`
