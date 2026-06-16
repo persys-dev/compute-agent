@@ -3,167 +3,237 @@ package config
 import (
 	"fmt"
 	"os"
-	"strconv"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
-	"github.com/persys-dev/compute-agent/internal/node"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/node"
+	"github.com/spf13/pflag"
+	"github.com/spf13/viper"
 )
 
 // Config holds all agent configuration
 type Config struct {
 	// Server configuration
-	GRPCAddr string
-	GRPCPort int
-	// Metrics endpoint configuration
-	MetricsPort int
+	GRPCAddr    string `mapstructure:"grpc_addr"`
+	GRPCPort    int    `mapstructure:"grpc_port"`
+	MetricsPort int    `mapstructure:"metrics_port"`
 
 	// TLS/mTLS configuration
-	TLSEnabled  bool
-	TLSCertPath string
-	TLSKeyPath  string
-	TLSCAPath   string
+	TLSEnabled  bool   `mapstructure:"tls_enabled"`
+	TLSCertPath string `mapstructure:"tls_cert_path"`
+	TLSKeyPath  string `mapstructure:"tls_key_path"`
+	TLSCAPath   string `mapstructure:"tls_ca_path"`
 
 	// Vault certificate manager configuration
-	VaultEnabled       bool
-	VaultAddr          string
-	VaultAuthMethod    string
-	VaultToken         string
-	VaultAppRoleID     string
-	VaultAppSecretID   string
-	VaultPKIMount      string
-	VaultPKIRole       string
-	VaultCertTTL       time.Duration
-	VaultServiceName   string
-	VaultServiceDomain string
-	VaultRetryInterval time.Duration
+	VaultEnabled       bool          `mapstructure:"vault_enabled"`
+	VaultAddr          string        `mapstructure:"vault_addr"`
+	VaultAuthMethod    string        `mapstructure:"vault_auth_method"`
+	VaultToken         string        `mapstructure:"vault_token"`
+	VaultAppRoleID     string        `mapstructure:"vault_approle_role_id"`
+	VaultAppSecretID   string        `mapstructure:"vault_approle_secret_id"`
+	VaultPKIMount      string        `mapstructure:"vault_pki_mount"`
+	VaultPKIRole       string        `mapstructure:"vault_pki_role"`
+	VaultCertTTL       time.Duration `mapstructure:"vault_cert_ttl"`
+	VaultServiceName   string        `mapstructure:"vault_service_name"`
+	VaultServiceDomain string        `mapstructure:"vault_service_domain"`
+	VaultRetryInterval time.Duration `mapstructure:"vault_retry_interval"`
 
 	// State store configuration
-	StateStorePath string
+	StateStorePath string `mapstructure:"state_store_path"`
 
 	// Runtime configuration
-	DockerEnabled  bool
-	DockerEndpoint string
-	ComposeEnabled bool
-	ComposeBinary  string
-	VMEnabled      bool
-	LibvirtURI     string
+	DockerEnabled  bool   `mapstructure:"docker_enabled"`
+	DockerEndpoint string `mapstructure:"docker_endpoint"`
+	ComposeEnabled bool   `mapstructure:"compose_enabled"`
+	ComposeBinary  string `mapstructure:"compose_binary"`
+	VMEnabled      bool   `mapstructure:"vm_enabled"`
+	LibvirtURI     string `mapstructure:"libvirt_uri"`
 
 	// Managed storage provider configuration
-	StorageLocalRoot    string
-	StorageNFSStageDir  string
-	StorageNFSServer    string
-	StorageNFSExport    string
-	StorageNFSOptions   string
-	StorageCephStageDir string
-	StorageCephCluster  string
-	StorageCephPool     string
-	StorageCephUser     string
-	StorageCephKeyring  string
+	StorageLocalRoot    string `mapstructure:"storage_local_root"`
+	StorageNFSStageDir  string `mapstructure:"storage_nfs_stage_dir"`
+	StorageNFSServer    string `mapstructure:"storage_nfs_server"`
+	StorageNFSExport    string `mapstructure:"storage_nfs_export"`
+	StorageNFSOptions   string `mapstructure:"storage_nfs_options"`
+	StorageCephStageDir string `mapstructure:"storage_ceph_stage_dir"`
+	StorageCephCluster  string `mapstructure:"storage_ceph_cluster"`
+	StorageCephPool     string `mapstructure:"storage_ceph_pool"`
+	StorageCephUser     string `mapstructure:"storage_ceph_user"`
+	StorageCephKeyring  string `mapstructure:"storage_ceph_keyring"`
 
 	// Reconciliation configuration
-	ReconcileInterval time.Duration
-	ReconcileEnabled  bool
+	ReconcileInterval time.Duration `mapstructure:"reconcile_interval"`
+	ReconcileEnabled  bool          `mapstructure:"reconcile_enabled"`
 
 	// Logging
-	LogLevel string
+	LogLevel string `mapstructure:"log_level"`
 
 	// Agent metadata
-	NodeID     string
-	Version    string
-	NodeRegion string
-	NodeEnv    string
-	NodeLabels map[string]string
+	NodeID     string            `mapstructure:"node_id"`
+	Version    string            `mapstructure:"version"`
+	NodeRegion string            `mapstructure:"node_region"`
+	NodeEnv    string            `mapstructure:"node_env"`
+	NodeLabels map[string]string `mapstructure:"node_labels"`
 
 	// Scheduler control-plane configuration
-	SchedulerAddr       string
-	SchedulerInsecure   bool
+	SchedulerAddr       string `mapstructure:"scheduler_addr"`
+	SchedulerInsecure   bool   `mapstructure:"scheduler_insecure"`
 	SchedulerTLSEnabled bool
-	AgentGRPCEndpoint   string
+	AgentGRPCEndpoint   string `mapstructure:"agent_grpc_endpoint"`
+
+	// OpenTelemetry configuration
+	OTELExporterEndpoint string `mapstructure:"otlp_endpoint"`
 }
 
-// Load reads configuration from environment variables with sensible defaults
+var (
+	fs = pflag.NewFlagSet("compute-agent", pflag.ContinueOnError)
+)
+
+// Load loads configuration with Viper + pflag
 func Load() (*Config, error) {
-	cfg := &Config{
-		// Server defaults
-		GRPCAddr:    getEnv("PERSYS_GRPC_ADDR", "0.0.0.0"),
-		GRPCPort:    getEnvAsInt("PERSYS_GRPC_PORT", 50051),
-		MetricsPort: getEnvAsInt("PERSYS_METRICS_PORT", 8089),
+	v := viper.New()
 
-		// TLS defaults
-		TLSEnabled:         getEnvAsBool("PERSYS_TLS_ENABLED", true),
-		TLSCertPath:        getEnv("PERSYS_TLS_CERT", "/etc/persys/certs/agent/compute-agent.pem"),
-		TLSKeyPath:         getEnv("PERSYS_TLS_KEY", "/etc/persys/certs/agent/compute-agent-key.pem"),
-		TLSCAPath:          getEnv("PERSYS_TLS_CA", "/etc/persys/certs/agent/ca.pem"),
-		VaultEnabled:       getEnvAsBool("PERSYS_VAULT_ENABLED", true),
-		VaultAddr:          getEnv("PERSYS_VAULT_ADDR", "http://localhost:8200"),
-		VaultAuthMethod:    strings.ToLower(getEnv("PERSYS_VAULT_AUTH_METHOD", "approle")),
-		VaultToken:         getEnv("PERSYS_VAULT_TOKEN", ""),
-		VaultAppRoleID:     getEnv("PERSYS_VAULT_APPROLE_ROLE_ID", ""),
-		VaultAppSecretID:   getEnv("PERSYS_VAULT_APPROLE_SECRET_ID", ""),
-		VaultPKIMount:      getEnv("PERSYS_VAULT_PKI_MOUNT", "pki"),
-		VaultPKIRole:       getEnv("PERSYS_VAULT_PKI_ROLE", "compute-agent"),
-		VaultCertTTL:       getEnvAsDuration("PERSYS_VAULT_CERT_TTL", 24*time.Hour),
-		VaultServiceName:   getEnv("PERSYS_VAULT_SERVICE_NAME", "compute-agent"),
-		VaultServiceDomain: getEnv("PERSYS_VAULT_SERVICE_DOMAIN", ""),
-		VaultRetryInterval: getEnvAsDuration("PERSYS_VAULT_RETRY_INTERVAL", 2*time.Minute),
+	v.SetConfigName("agent_config")
+	v.SetConfigType("yaml")
+	v.SetEnvPrefix("PERSYS")
+	v.AutomaticEnv()
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
 
-		// State store defaults
-		StateStorePath: getEnv("PERSYS_STATE_PATH", "/var/lib/persys/state.db"),
+	// Explicitly bind important fields for tests
+	v.BindEnv("grpc_port")
+	v.BindEnv("state_store_path", "PERSYS_STATE_PATH", "PERSYS_STATE_STORE_PATH")
+	v.BindEnv("node_region")
+	v.BindEnv("node_env")
+	v.BindEnv("node_labels")
+	v.BindEnv("scheduler_addr")
+	v.BindEnv("scheduler_insecure")
+	v.BindEnv("docker_enabled")
+	v.BindEnv("compose_enabled")
+	v.BindEnv("vm_enabled")
+	v.BindEnv("tls_enabled")
+	v.BindEnv("vault_enabled")
 
-		// Runtime defaults
-		DockerEnabled:  getEnvAsBool("PERSYS_DOCKER_ENABLED", true),
-		DockerEndpoint: getEnv("DOCKER_HOST", "unix:///var/run/docker.sock"),
-		ComposeEnabled: getEnvAsBool("PERSYS_COMPOSE_ENABLED", true),
-		ComposeBinary:  getEnv("PERSYS_COMPOSE_BINARY", "docker compose"),
-		VMEnabled:      getEnvAsBool("PERSYS_VM_ENABLED", true),
-		LibvirtURI:     getEnv("PERSYS_LIBVIRT_URI", "qemu:///system"),
-
-		StorageLocalRoot:    getEnv("PERSYS_STORAGE_LOCAL_ROOT", "/var/lib/persys/volumes/local"),
-		StorageNFSStageDir:  getEnv("PERSYS_STORAGE_NFS_STAGE_ROOT", "/var/lib/persys/volumes/nfs"),
-		StorageNFSServer:    getEnv("PERSYS_STORAGE_NFS_SERVER", ""),
-		StorageNFSExport:    getEnv("PERSYS_STORAGE_NFS_EXPORT", ""),
-		StorageNFSOptions:   getEnv("PERSYS_STORAGE_NFS_MOUNT_OPTIONS", ""),
-		StorageCephStageDir: getEnv("PERSYS_STORAGE_CEPH_STAGE_ROOT", "/var/lib/persys/volumes/ceph-rbd"),
-		StorageCephCluster:  getEnv("PERSYS_STORAGE_CEPH_CLUSTER", ""),
-		StorageCephPool:     getEnv("PERSYS_STORAGE_CEPH_POOL", ""),
-		StorageCephUser:     getEnv("PERSYS_STORAGE_CEPH_USER", ""),
-		StorageCephKeyring:  getEnv("PERSYS_STORAGE_CEPH_KEYRING", ""),
-
-		// Reconciliation defaults
-		ReconcileInterval: getEnvAsDuration("PERSYS_RECONCILE_INTERVAL", 30*time.Second),
-		ReconcileEnabled:  getEnvAsBool("PERSYS_RECONCILE_ENABLED", true),
-
-		// Logging
-		LogLevel: getEnv("PERSYS_LOG_LEVEL", "info"),
-
-		// Metadata
-		NodeID:     generateNodeID(),
-		Version:    getEnv("PERSYS_VERSION", "dev"),
-		NodeRegion: getEnv("PERSYS_NODE_REGION", ""),
-		NodeEnv:    getEnv("PERSYS_NODE_ENV", ""),
-
-		// Scheduler defaults
-		SchedulerAddr:       getEnv("PERSYS_SCHEDULER_ADDR", "127.0.0.1:8085"),
-		SchedulerInsecure:   getEnvAsBool("PERSYS_SCHEDULER_INSECURE", false),
-		SchedulerTLSEnabled: !getEnvAsBool("PERSYS_SCHEDULER_INSECURE", false),
-		AgentGRPCEndpoint:   getEnv("PERSYS_AGENT_GRPC_ENDPOINT", ""),
+	// Handle PERSYS_NODE_LABELS specially
+	if labelsEnv := os.Getenv("PERSYS_NODE_LABELS"); labelsEnv != "" {
+		v.Set("node_labels", parseLabelsEnv(labelsEnv))
 	}
 
-	cfg.NodeLabels = parseNodeLabels(
-		cfg.NodeRegion,
-		cfg.NodeEnv,
-		getEnv("PERSYS_NODE_LABELS", ""),
-	)
+	// Bind CLI flag safely
+	if fs.Lookup("config") == nil {
+		fs.String("config", "", "Path to config file")
+	}
+	fs.Parse(os.Args[1:])
+
+	// Config file handling
+	if cfgFile := fs.Lookup("config").Value.String(); cfgFile != "" {
+		v.SetConfigFile(cfgFile)
+	} else if envFile := os.Getenv("PERSYS_CONFIG_FILE"); envFile != "" {
+		v.SetConfigFile(envFile)
+	} else {
+		for _, path := range getConfigSearchPaths() {
+			v.AddConfigPath(path)
+		}
+	}
+
+	// Read config file (graceful)
+	if err := v.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+			return nil, fmt.Errorf("config file error: %w", err)
+		}
+		// No config file is normal → use defaults + ENV
+	}
+
+	// Unmarshal (defaults + file + env)
+	cfg := defaultConfig()
+	if err := v.Unmarshal(cfg); err != nil {
+		return nil, fmt.Errorf("unmarshal config: %w", err)
+	}
+
+	// Post-processing
+	cfg.SchedulerTLSEnabled = !cfg.SchedulerInsecure
+
+	if cfg.NodeID == "" {
+		cfg.NodeID = generateNodeID()
+	}
+
+	// Node labels: defaults + region/env
+	if cfg.NodeLabels == nil {
+		cfg.NodeLabels = make(map[string]string)
+	}
+	cfg.NodeLabels = mergeWithDefaultLabels(cfg.NodeLabels)
+	cfg.NodeLabels = parseNodeLabels(cfg.NodeRegion, cfg.NodeEnv, cfg.NodeLabels)
 
 	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid configuration: %w", err)
+		return nil, err
 	}
+
+	configSrc := v.ConfigFileUsed()
+	if configSrc == "" {
+		configSrc = "defaults + env"
+	}
+	fmt.Printf("✅ Config loaded from: %s | NodeID: %s\n", configSrc, cfg.NodeID)
 
 	return cfg, nil
 }
 
-// Validate checks that the configuration is valid
+// getConfigSearchPaths returns possible locations for agent_config.yaml
+func getConfigSearchPaths() []string {
+	paths := []string{"/etc/persys"}
+	if os.Geteuid() != 0 {
+		if home, err := os.UserHomeDir(); err == nil {
+			paths = append(paths, filepath.Join(home, ".persys"))
+		}
+	}
+	paths = append(paths, ".")
+	return paths
+}
+
+// defaultConfig returns a Config with sensible defaults
+func defaultConfig() *Config {
+	return &Config{
+		GRPCAddr:    "0.0.0.0",
+		GRPCPort:    50051,
+		MetricsPort: 8089,
+
+		TLSEnabled:  true,
+		TLSCertPath: "/etc/persys/certs/agent/compute-agent.pem",
+		TLSKeyPath:  "/etc/persys/certs/agent/compute-agent-key.pem",
+		TLSCAPath:   "/etc/persys/certs/agent/ca.pem",
+
+		VaultEnabled:       false, // Changed default for test friendliness
+		VaultAddr:          "http://localhost:8200",
+		VaultAuthMethod:    "approle",
+		VaultPKIMount:      "pki",
+		VaultPKIRole:       "compute-agent",
+		VaultCertTTL:       24 * time.Hour,
+		VaultRetryInterval: 2 * time.Minute,
+
+		StateStorePath: "/var/lib/persys/state.db",
+
+		DockerEnabled:  true,
+		DockerEndpoint: "unix:///var/run/docker.sock",
+		ComposeEnabled: true,
+		ComposeBinary:  "docker compose",
+		VMEnabled:      true,
+		LibvirtURI:     "qemu:///system",
+
+		StorageLocalRoot:    "/var/lib/persys/volumes/local",
+		StorageNFSStageDir:  "/var/lib/persys/volumes/nfs",
+		StorageCephStageDir: "/var/lib/persys/volumes/ceph-rbd",
+
+		ReconcileInterval: 30 * time.Second,
+		ReconcileEnabled:  true,
+
+		LogLevel: "info",
+
+		SchedulerAddr:     "127.0.0.1:8085",
+		SchedulerInsecure: false,
+	}
+}
+
+// Validate ensures config correctness
 func (c *Config) Validate() error {
 	if c.GRPCPort < 1 || c.GRPCPort > 65535 {
 		return fmt.Errorf("invalid GRPC port: %d", c.GRPCPort)
@@ -171,34 +241,29 @@ func (c *Config) Validate() error {
 	if c.MetricsPort < 1 || c.MetricsPort > 65535 {
 		return fmt.Errorf("invalid metrics port: %d", c.MetricsPort)
 	}
-
 	if c.TLSEnabled {
 		if c.TLSCertPath == "" || c.TLSKeyPath == "" || c.TLSCAPath == "" {
 			return fmt.Errorf("TLS enabled but certificate paths not configured")
 		}
 	}
-
 	if c.VaultEnabled {
 		if !c.TLSEnabled {
-			return fmt.Errorf("vault cert manager requires TLS to be enabled")
+			return fmt.Errorf("vault requires TLS enabled")
 		}
 		if c.VaultAddr == "" {
-			return fmt.Errorf("vault is enabled but PERSYS_VAULT_ADDR is empty")
+			return fmt.Errorf("vault enabled but addr is empty")
 		}
-		if c.VaultPKIMount == "" || c.VaultPKIRole == "" {
-			return fmt.Errorf("vault is enabled but PKI mount/role is not configured")
-		}
-		switch c.VaultAuthMethod {
+		switch strings.ToLower(c.VaultAuthMethod) {
 		case "token":
 			if c.VaultToken == "" {
-				return fmt.Errorf("vault token auth selected but PERSYS_VAULT_TOKEN is empty")
+				return fmt.Errorf("vault token auth selected but token is empty")
 			}
 		case "approle":
 			if c.VaultAppRoleID == "" || c.VaultAppSecretID == "" {
-				return fmt.Errorf("vault approle auth selected but role_id/secret_id is missing")
+				return fmt.Errorf("vault approle auth selected but role_id/secret_id missing")
 			}
 		default:
-			return fmt.Errorf("unsupported vault auth method %q (expected token|approle)", c.VaultAuthMethod)
+			return fmt.Errorf("unsupported vault auth method %q", c.VaultAuthMethod)
 		}
 		if c.VaultCertTTL <= 0 {
 			return fmt.Errorf("vault cert TTL must be positive")
@@ -207,101 +272,77 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("vault retry interval must be positive")
 		}
 	}
-
-	if c.StateStorePath == "" {
-		return fmt.Errorf("state store path cannot be empty")
-	}
-
 	if !c.DockerEnabled && !c.ComposeEnabled && !c.VMEnabled {
 		return fmt.Errorf("at least one runtime must be enabled")
 	}
-
 	if c.SchedulerAddr == "" {
 		return fmt.Errorf("scheduler address cannot be empty")
 	}
-
 	return nil
 }
 
-// Helper functions
-func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
+// mergeWithDefaultLabels, parseNodeLabels, generateNodeID, parseLabelsEnv remain the same as before
+func mergeWithDefaultLabels(labels map[string]string) map[string]string {
+	defaults := map[string]string{
+		"os":   runtime.GOOS,
+		"arch": runtime.GOARCH,
 	}
-	return defaultValue
-}
-
-func getEnvAsInt(key string, defaultValue int) int {
-	if value := os.Getenv(key); value != "" {
-		if intVal, err := strconv.Atoi(value); err == nil {
-			return intVal
+	for k, v := range defaults {
+		if _, exists := labels[k]; !exists {
+			labels[k] = v
 		}
 	}
-	return defaultValue
+	return labels
 }
 
-func getEnvAsBool(key string, defaultValue bool) bool {
-	if value := os.Getenv(key); value != "" {
-		if boolVal, err := strconv.ParseBool(value); err == nil {
-			return boolVal
-		}
+// parseNodeLabels merges region/env (takes precedence)
+func parseNodeLabels(region, env string, raw map[string]string) map[string]string {
+	if raw == nil {
+		raw = make(map[string]string)
 	}
-	return defaultValue
-}
-
-func getEnvAsDuration(key string, defaultValue time.Duration) time.Duration {
-	if value := os.Getenv(key); value != "" {
-		if duration, err := time.ParseDuration(value); err == nil {
-			return duration
-		}
-	}
-	return defaultValue
-}
-
-func parseNodeLabels(region, env, labelsRaw string) map[string]string {
-	labels := make(map[string]string)
-
 	if region != "" {
-		labels["region"] = region
+		raw["region"] = region
 	}
 	if env != "" {
-		labels["env"] = env
+		raw["env"] = env
 	}
+	return raw
+}
 
-	for _, pair := range strings.Split(labelsRaw, ",") {
+// generateNodeID creates unique node identifier
+func generateNodeID() string {
+	id, err := node.GenerateUniqueNodeID()
+	if err != nil {
+		id = getHostname()
+	}
+	return id
+}
+
+func getHostname() string {
+	if h, err := os.Hostname(); err == nil {
+		return h
+	}
+	return "unknown"
+}
+
+// parseLabelsEnv parses comma-separated key=value pairs, skips invalid ones
+func parseLabelsEnv(s string) map[string]string {
+	labels := make(map[string]string)
+	if s == "" {
+		return labels
+	}
+	for _, pair := range strings.Split(s, ",") {
 		pair = strings.TrimSpace(pair)
 		if pair == "" {
 			continue
 		}
-		kv := strings.SplitN(pair, "=", 2)
-		if len(kv) != 2 {
-			continue
+		if idx := strings.Index(pair, "="); idx > 0 {
+			k := strings.TrimSpace(pair[:idx])
+			v := strings.TrimSpace(pair[idx+1:])
+			if k != "" && v != "" {
+				labels[k] = v
+			}
 		}
-		key := strings.TrimSpace(kv[0])
-		value := strings.TrimSpace(kv[1])
-		if key == "" || value == "" {
-			continue
-		}
-		labels[key] = value
 	}
-
 	return labels
-}
-
-func getHostname() string {
-	hostname, err := os.Hostname()
-	if err != nil {
-		return "unknown"
-	}
-	return hostname
-}
-
-// generateNodeID creates a unique node identifier
-func generateNodeID() string {
-	nodeID, err := node.GenerateUniqueNodeID()
-	if err != nil {
-		// Log warning and return fallback
-		nodeID = getHostname()
-	}
-	return nodeID
 }

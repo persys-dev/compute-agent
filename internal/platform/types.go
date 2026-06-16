@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/persys-dev/compute-agent/pkg/models"
+	"github.com/persys-dev/persys-cloud/compute-agent/pkg/models"
 )
 
 // VolumeSpec describes a managed volume request independent of runtime backend.

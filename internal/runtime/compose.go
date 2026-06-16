@@ -11,7 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/persys-dev/compute-agent/pkg/models"
+	"github.com/persys-dev/persys-cloud/compute-agent/pkg/models"
 	"github.com/sirupsen/logrus"
 )
 

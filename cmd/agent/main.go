@@ -9,22 +9,22 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/persys-dev/compute-agent/internal/certmanager"
-	"github.com/persys-dev/compute-agent/internal/config"
-	"github.com/persys-dev/compute-agent/internal/control"
-	"github.com/persys-dev/compute-agent/internal/garbage"
-	"github.com/persys-dev/compute-agent/internal/grpc"
-	"github.com/persys-dev/compute-agent/internal/metrics"
-	"github.com/persys-dev/compute-agent/internal/platform"
-	"github.com/persys-dev/compute-agent/internal/reconcile"
-	"github.com/persys-dev/compute-agent/internal/resources"
-	"github.com/persys-dev/compute-agent/internal/runtime"
-	"github.com/persys-dev/compute-agent/internal/state"
-	"github.com/persys-dev/compute-agent/internal/storage/providers"
-	"github.com/persys-dev/compute-agent/internal/task"
-	"github.com/persys-dev/compute-agent/internal/telemetry"
-	"github.com/persys-dev/compute-agent/internal/workload"
-	"github.com/persys-dev/compute-agent/pkg/models"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/certmanager"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/config"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/control"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/garbage"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/grpc"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/metrics"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/platform"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/reconcile"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/resources"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/runtime"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/state"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/storage/providers"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/task"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/telemetry"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/workload"
+	"github.com/persys-dev/persys-cloud/compute-agent/pkg/models"
 	"github.com/sirupsen/logrus"
 )
 
@@ -40,10 +40,11 @@ func main() {
 		FullTimestamp: true,
 	})
 
-	// Load configuration
+	// Load configuration (this now supports --config flag + /etc/persys + env)
 	cfg, err := config.Load()
 	if err != nil {
-		logger.Fatalf("Failed to load configuration: %v", err)
+		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Set log level
@@ -57,7 +58,7 @@ func main() {
 	logger.Infof("Starting Persys Compute Agent v%s", version)
 	logger.Infof("Node ID: %s", cfg.NodeID)
 
-	otelShutdown, err := telemetry.Setup(context.Background(), logger, "compute-agent")
+	otelShutdown, err := telemetry.Setup(context.Background(), logger, "compute-agent", cfg.OTELExporterEndpoint)
 	if err != nil {
 		logger.Fatalf("Failed to initialize OpenTelemetry: %v", err)
 	}

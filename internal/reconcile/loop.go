@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/persys-dev/compute-agent/internal/state"
-	"github.com/persys-dev/compute-agent/internal/workload"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/state"
+	"github.com/persys-dev/persys-cloud/compute-agent/internal/workload"
 	"github.com/sirupsen/logrus"
 )
 
