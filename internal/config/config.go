@@ -114,6 +114,10 @@ func Load() (*Config, error) {
 	v.BindEnv("vm_enabled")
 	v.BindEnv("tls_enabled")
 	v.BindEnv("vault_enabled")
+	v.BindEnv("vault_approle_role_id")
+	v.BindEnv("vault_approle_secret_id")
+	v.BindEnv("vault_addr")
+	v.BindEnv("vault_service_name")
 
 	// Handle PERSYS_NODE_LABELS specially
 	if labelsEnv := os.Getenv("PERSYS_NODE_LABELS"); labelsEnv != "" {
